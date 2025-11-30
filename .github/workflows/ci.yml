@@ -7,8 +7,6 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    env:
-      PI_SSH_KEY_RSA: ${{ secrets.PI_SSH_KEY_RSA }}
 
     steps:
       - name: Checkout
@@ -39,12 +37,22 @@ jobs:
             --exclude='./uploads' \
             --exclude='./client-dist' \
             .
+
       - name: Write SSH private key
         run: |
           mkdir -p ~/.ssh
-          printf '%s' "$PI_SSH_KEY_RSA" > ~/.ssh/hailo-ci
+          # Secret에 들어있는 멀티라인 키를 그대로 파일로 저장
+          printf '%s\n' "${{ secrets.PI_SSH_KEY }}" > ~/.ssh/hailo-ci
           chmod 600 ~/.ssh/hailo-ci
           ssh-keyscan -H ${{ secrets.PI_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Verify SSH connection
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PI_HOST }}
+          username: ${{ secrets.PI_USER }}
+          key_path: /home/runner/.ssh/hailo-ci
+          script: echo "SSH connection established"
 
       - name: Upload archive to Raspberry Pi
         uses: appleboy/scp-action@v0.1.7
@@ -78,6 +86,9 @@ jobs:
 
             cd "$RELEASES_DIR"
             ls -1dt */ | tail -n +4 | xargs -r rm -rf
+
+            # pm2 위치를 PATH에 추가 (필요 시 조정)
+            export PATH="$HOME/.nvm/versions/node/v20.19.4/bin:$PATH"
 
             pm2 reload hailo-back || pm2 start "$CURRENT_LINK/ecosystem.config.cjs" --env production
 
