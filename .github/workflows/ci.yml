@@ -55,7 +55,7 @@ jobs:
         with:
           host: ${{ secrets.PI_HOST }}
           username: ${{ secrets.PI_USER }}
-          key_path: /home/runner/.ssh/hailo-ci
+          key: ${{ secrets.PI_SSH_KEY }}
           script: echo "SSH connection established"
 
       - name: Upload archive to Raspberry Pi
@@ -63,7 +63,7 @@ jobs:
         with:
           host: ${{ secrets.PI_HOST }}
           username: ${{ secrets.PI_USER }}
-          key_path: /home/runner/.ssh/hailo-ci
+          key: ${{ secrets.PI_SSH_KEY }}
           source: "/tmp/hailo-back-${{ env.RELEASE_NAME }}.tar.gz"
           target: "/tmp"
 
@@ -72,7 +72,7 @@ jobs:
         with:
           host: ${{ secrets.PI_HOST }}
           username: ${{ secrets.PI_USER }}
-          key_path: /home/runner/.ssh/hailo-ci
+          key: ${{ secrets.PI_SSH_KEY }}
           script: |
             set -e
             RELEASES_DIR=~/hailo-back/releases
