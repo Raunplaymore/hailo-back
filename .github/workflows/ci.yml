@@ -40,8 +40,6 @@ jobs:
             --exclude='./client-dist' \
             .
       - name: Write SSH private key
-        env:
-          PI_SSH_KEY_RSA: ${{ env.PI_SSH_KEY_RSA }}
         run: |
           mkdir -p ~/.ssh
           printf '%s' "$PI_SSH_KEY_RSA" > ~/.ssh/hailo-ci
@@ -81,6 +79,6 @@ jobs:
             cd "$RELEASES_DIR"
             ls -1dt */ | tail -n +4 | xargs -r rm -rf
 
-            pm2 reload hailo-back || pm2 start "$CURRENT_LINK/ecosystem.config.js" --env production
+            pm2 reload hailo-back || pm2 start "$CURRENT_LINK/ecosystem.config.cjs" --env production
 
             rm -f "$ARCHIVE"

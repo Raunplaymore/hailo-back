@@ -18,9 +18,9 @@ node server.js
 
 ## PM2 운영
 - 전역 설치: `npm i -g pm2`
-- 시작: `pm2 start ecosystem.config.js --env production`
+- 시작: `pm2 start ecosystem.config.cjs --env production`
 - 부팅 자동시작: `pm2 save && pm2 startup`
-- 설정: `ecosystem.config.js`에서 `UPLOAD_DIR` 기본값(로컬 `./uploads`), production(`env_production`)에서 라즈베리 파이 경로 `/home/pi/uploads`를 사용하도록 되어 있습니다.
+- 설정: `ecosystem.config.cjs`에서 `UPLOAD_DIR` 기본값(로컬 `./uploads`), production(`env_production`)에서 라즈베리 파이 경로 `/home/pi/uploads`를 사용하도록 되어 있습니다.
 
 ## 서비스 등록(라즈베리 파이, systemd 사용 시)
 - `systemd/swing-server.service`를 `/etc/systemd/system/`에 설치 후 `sudo systemctl enable --now swing-server.service`
