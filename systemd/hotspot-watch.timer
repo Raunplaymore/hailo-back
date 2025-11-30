@@ -1,0 +1,10 @@
+[Unit]
+# Path to install: /etc/systemd/system/hotspot-watch.timer
+Description=Run hotspot watch every 15 seconds
+
+[Timer]
+OnBootSec=10
+OnUnitActiveSec=15
+
+[Install]
+WantedBy=timers.target

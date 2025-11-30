@@ -1,0 +1,7 @@
+[Unit]
+# Path to install: /etc/systemd/system/hotspot-watch.service
+Description=Check iPhone hotspot and control swing server
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/check-hotspot-and-start.sh

@@ -1,0 +1,5 @@
+node_modules
+uploads
+client-dist
+.DS_Store
+npm-debug.log*
