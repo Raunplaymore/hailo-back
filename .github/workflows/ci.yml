@@ -30,13 +30,17 @@ jobs:
         run: echo "RELEASE_NAME=$(date +%Y%m%d%H%M%S)" >> $GITHUB_ENV
 
       - name: Create backend release archive
+        env:
+          RELEASE_NAME: ${{ env.RELEASE_NAME }}
         run: |
-          tar czf /tmp/hailo-back-${RELEASE_NAME}.tar.gz \
+          ARCHIVE=/tmp/hailo-back-${RELEASE_NAME}.tar.gz
+          tar czf "$ARCHIVE" \
             --exclude='./.git' \
             --exclude='./node_modules' \
             --exclude='./uploads' \
             --exclude='./client-dist' \
             .
+          ls -lh "$ARCHIVE"
 
       - name: Write SSH private key
         run: |
