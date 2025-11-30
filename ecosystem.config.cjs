@@ -16,7 +16,7 @@ module.exports = {
       env_production: {
         NODE_ENV: 'production',
         // 라즈베리 파이에서 원래 경로를 쓰고 싶다면 아래 경로를 유지하세요.
-        UPLOAD_DIR: '/home/pi/uploads',
+        UPLOAD_DIR: '/home/ray/uploads',
       },
       instances: 1,
       autorestart: true,
