@@ -1,30 +1,71 @@
-name: CI
+name: Deploy Backend
 
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
 
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Use Node.js 20.19.4
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 20.19.4
           cache: npm
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install dependencies (lockfile check)
+        run: npm ci --ignore-scripts
 
-      - name: Run tests (if present)
-        run: npm test --if-present
+      - name: Set release name
+        run: echo "RELEASE_NAME=$(date +%Y%m%d%H%M%S)" >> $GITHUB_ENV
 
-      - name: Run lint (if present)
-        run: npm run lint --if-present
+      - name: Create backend release archive
+        run: |
+          tar czf /tmp/hailo-back-${RELEASE_NAME}.tar.gz \
+            --exclude='./.git' \
+            --exclude='./node_modules' \
+            --exclude='./uploads' \
+            --exclude='./client-dist' \
+            .
+
+      - name: Upload archive to Raspberry Pi
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.PI_HOST }}
+          username: ${{ secrets.PI_USER }}
+          key: ${{ secrets.PI_SSH_KEY }}
+          source: "/tmp/hailo-back-${{ env.RELEASE_NAME }}.tar.gz"
+          target: "/tmp"
+
+      - name: Deploy and activate release on Raspberry Pi
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PI_HOST }}
+          username: ${{ secrets.PI_USER }}
+          key: ${{ secrets.PI_SSH_KEY }}
+          script: |
+            set -e
+            RELEASES_DIR=~/hailo-back/releases
+            CURRENT_LINK=~/hailo-back/current
+            ARCHIVE=/tmp/hailo-back-${RELEASE_NAME}.tar.gz
+            TARGET="$RELEASES_DIR/${RELEASE_NAME}"
+
+            mkdir -p "$TARGET"
+            tar xzf "$ARCHIVE" -C "$TARGET"
+
+            cd "$TARGET"
+            npm ci --omit=dev
+
+            ln -sfn "$TARGET" "$CURRENT_LINK"
+
+            cd "$RELEASES_DIR"
+            ls -1dt */ | tail -n +4 | xargs -r rm -rf
+
+            pm2 reload hailo-back || pm2 start "$CURRENT_LINK/ecosystem.config.js" --env production
+
+            rm -f "$ARCHIVE"
