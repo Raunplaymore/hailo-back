@@ -38,10 +38,13 @@ jobs:
             --exclude='./client-dist' \
             .
       - name: Write SSH private key
+        env:
+          PI_SSH_KEY_RSA: ${{ secrets.PI_SSH_KEY_RSA }}
         run: |
-          mkdir -p /home/runner/.ssh
-          echo "${{ secrets.PI_SSH_KEY_B64 }}" | base64 --decode > /home/runner/.ssh/hailo-ci
-          chmod 600 /home/runner/.ssh/hailo-ci
+          mkdir -p ~/.ssh
+          printf '%s' "$PI_SSH_KEY_RSA" > ~/.ssh/hailo-ci
+          chmod 600 ~/.ssh/hailo-ci
+          ssh-keyscan -H ${{ secrets.PI_HOST }} >> ~/.ssh/known_hosts
 
       - name: Upload archive to Raspberry Pi
         uses: appleboy/scp-action@v0.1.7
