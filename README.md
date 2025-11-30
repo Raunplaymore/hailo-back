@@ -1,4 +1,4 @@
-# Raspberry Pi Swing Upload Server
+# hailo-back (Raspberry Pi Swing Upload Server)
 
 간단한 Express 백엔드로 스윙 영상을 업로드하고 정적 프론트(`client-dist`)를 제공하는 서비스입니다. 기본 포트는 `3000`입니다.
 
