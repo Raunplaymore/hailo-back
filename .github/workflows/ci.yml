@@ -7,6 +7,8 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      PI_SSH_KEY_RSA: ${{ secrets.PI_SSH_KEY_RSA }}
 
     steps:
       - name: Checkout
@@ -39,7 +41,7 @@ jobs:
             .
       - name: Write SSH private key
         env:
-          PI_SSH_KEY_RSA: ${{ secrets.PI_SSH_KEY_RSA }}
+          PI_SSH_KEY_RSA: ${{ env.PI_SSH_KEY_RSA }}
         run: |
           mkdir -p ~/.ssh
           printf '%s' "$PI_SSH_KEY_RSA" > ~/.ssh/hailo-ci
