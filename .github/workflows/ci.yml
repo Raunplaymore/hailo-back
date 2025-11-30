@@ -33,7 +33,7 @@ jobs:
         env:
           RELEASE_NAME: ${{ env.RELEASE_NAME }}
         run: |
-          ARCHIVE=/tmp/hailo-back-${RELEASE_NAME}.tar.gz
+          ARCHIVE=./hailo-back-${RELEASE_NAME}.tar.gz
           tar czf "$ARCHIVE" \
             --exclude='./.git' \
             --exclude='./node_modules' \
@@ -45,8 +45,8 @@ jobs:
       - name: Check archive exists
         run: |
           set -e
-          ls -lh /tmp/hailo-back-${RELEASE_NAME}.tar.gz
-          test -s /tmp/hailo-back-${RELEASE_NAME}.tar.gz
+          ls -lh ./hailo-back-${RELEASE_NAME}.tar.gz
+          test -s ./hailo-back-${RELEASE_NAME}.tar.gz
 
       - name: Write SSH private key
         run: |
@@ -61,7 +61,7 @@ jobs:
         with:
           host: ${{ secrets.PI_HOST }}
           username: ${{ secrets.PI_USER }}
-          key: ${{ secrets.PI_SSH_KEY }}
+          key_path: /home/runner/.ssh/hailo-ci
           script: echo "SSH connection established"
 
       - name: Upload archive to Raspberry Pi
@@ -69,8 +69,8 @@ jobs:
         with:
           host: ${{ secrets.PI_HOST }}
           username: ${{ secrets.PI_USER }}
-          key: ${{ secrets.PI_SSH_KEY }}
-          source: "/tmp/hailo-back-${{ env.RELEASE_NAME }}.tar.gz"
+          key_path: /home/runner/.ssh/hailo-ci
+          source: "hailo-back-${{ env.RELEASE_NAME }}.tar.gz"
           target: "/tmp"
 
       - name: Deploy and activate release on Raspberry Pi
@@ -78,7 +78,7 @@ jobs:
         with:
           host: ${{ secrets.PI_HOST }}
           username: ${{ secrets.PI_USER }}
-          key: ${{ secrets.PI_SSH_KEY }}
+          key_path: /home/runner/.ssh/hailo-ci
           script: |
             set -e
             RELEASES_DIR=~/hailo-back/releases
