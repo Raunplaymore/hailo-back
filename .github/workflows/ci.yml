@@ -37,13 +37,18 @@ jobs:
             --exclude='./uploads' \
             --exclude='./client-dist' \
             .
+      - name: Write SSH private key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.PI_SSH_KEY }}" > ~/.ssh/hailo-ci
+          chmod 600 ~/.ssh/hailo-ci
 
       - name: Upload archive to Raspberry Pi
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.PI_HOST }}
           username: ${{ secrets.PI_USER }}
-          key: ${{ secrets.PI_SSH_KEY }}
+          key_path: ~/.ssh/hailo-ci
           source: "/tmp/hailo-back-${{ env.RELEASE_NAME }}.tar.gz"
           target: "/tmp"
 
@@ -52,7 +57,7 @@ jobs:
         with:
           host: ${{ secrets.PI_HOST }}
           username: ${{ secrets.PI_USER }}
-          key: ${{ secrets.PI_SSH_KEY }}
+          key_path: ~/.ssh/hailo-ci
           script: |
             set -e
             RELEASES_DIR=~/hailo-back/releases
