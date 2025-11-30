@@ -39,8 +39,8 @@ jobs:
             .
       - name: Write SSH private key
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.PI_SSH_KEY }}" > /home/runner/.ssh/hailo-ci
+          mkdir -p /home/runner/.ssh
+          echo "${{ secrets.PI_SSH_KEY_B64 }}" | base64 --decode > /home/runner/.ssh/hailo-ci
           chmod 600 /home/runner/.ssh/hailo-ci
 
       - name: Upload archive to Raspberry Pi
