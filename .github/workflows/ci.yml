@@ -42,6 +42,12 @@ jobs:
             .
           ls -lh "$ARCHIVE"
 
+      - name: Check archive exists
+        run: |
+          set -e
+          ls -lh /tmp/hailo-back-${RELEASE_NAME}.tar.gz
+          test -s /tmp/hailo-back-${RELEASE_NAME}.tar.gz
+
       - name: Write SSH private key
         run: |
           mkdir -p ~/.ssh
