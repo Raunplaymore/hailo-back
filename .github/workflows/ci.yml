@@ -46,6 +46,9 @@ jobs:
             --exclude='client-dist' \
             ./ "$SRC"/
 
+          du -sh "$SRC"
+          find "$SRC" -maxdepth 2 -type f | head -n 20
+
           tar czf "$ARCHIVE" -C "$SRC" .
           ls -lh "$ARCHIVE"
 
@@ -68,6 +71,15 @@ jobs:
           key: ${{ secrets.PI_SSH_KEY }}
           source: "/tmp/hailo-back-${{ steps.set_release.outputs.release_name }}.tar.gz"
           target: "/tmp"
+
+      - name: Verify archive on Raspberry Pi
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PI_HOST }}
+          username: ${{ secrets.PI_USER }}
+          key: ${{ secrets.PI_SSH_KEY }}
+          script: |
+            ls -lh /tmp/hailo-back-${{ steps.set_release.outputs.release_name }}.tar.gz
 
       - name: Deploy and activate release on Raspberry Pi
         uses: appleboy/ssh-action@v1.2.0
