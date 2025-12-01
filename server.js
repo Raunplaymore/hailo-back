@@ -21,6 +21,18 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 app.use(express.json());
 
+// Simple CORS (allow configurable origin, default all)
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*';
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
+  res.header('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
 // Upload endpoint: expects multipart/form-data with field "video"
 app.post('/api/upload', upload.single('video'), (req, res) => {
   if (!req.file) {
