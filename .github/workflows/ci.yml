@@ -33,8 +33,9 @@ jobs:
       - name: Create backend release archive
         run: |
           RELEASE_NAME=${{ steps.set_release.outputs.release_name }}
-          ARCHIVE=/tmp/hailo-back-${RELEASE_NAME}.tar.gz
+          ARCHIVE="hailo-back-${RELEASE_NAME}.tar.gz"
           tar czf "$ARCHIVE" \
+            --exclude="./$ARCHIVE" \
             --exclude='./.git' \
             --exclude='./node_modules' \
             --exclude='./uploads' \
@@ -45,8 +46,8 @@ jobs:
       - name: Check archive exists
         run: |
           RELEASE_NAME=${{ steps.set_release.outputs.release_name }}
-          ls -lh /tmp/hailo-back-${RELEASE_NAME}.tar.gz
-          test -s /tmp/hailo-back-${RELEASE_NAME}.tar.gz
+          ls -lh ./hailo-back-${RELEASE_NAME}.tar.gz
+          test -s ./hailo-back-${RELEASE_NAME}.tar.gz
 
       - name: Debug /tmp before scp
         run: |
@@ -59,7 +60,7 @@ jobs:
           host: ${{ secrets.PI_HOST }}
           username: ${{ secrets.PI_USER }}
           key: ${{ secrets.PI_SSH_KEY }}
-          source: "/tmp/hailo-back-${{ steps.set_release.outputs.release_name }}.tar.gz"
+          source: "hailo-back-${{ steps.set_release.outputs.release_name }}.tar.gz"
           target: "/tmp"
 
       - name: Deploy and activate release on Raspberry Pi
