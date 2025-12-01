@@ -19,6 +19,7 @@ const storage = multer.diskStorage({
 });
 
 const upload = multer({ storage });
+app.use(express.json());
 
 // Upload endpoint: expects multipart/form-data with field "video"
 app.post('/api/upload', upload.single('video'), (req, res) => {
@@ -36,6 +37,27 @@ app.get('/api/files', (_req, res) => {
     }
     res.json(files);
   });
+});
+
+// Delete a file by name
+app.delete('/api/files/:name', async (req, res) => {
+  const resolvedUpload = path.resolve(uploadDir);
+  const target = path.resolve(uploadDir, req.params.name);
+
+  // Prevent path traversal outside uploadDir
+  if (!target.startsWith(`${resolvedUpload}${path.sep}`)) {
+    return res.status(400).json({ ok: false, message: 'Invalid file path' });
+  }
+
+  try {
+    await fs.promises.unlink(target);
+    res.json({ ok: true });
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      return res.status(404).json({ ok: false, message: 'File not found' });
+    }
+    res.status(500).json({ ok: false, message: err.message });
+  }
 });
 
 // Serve built React app

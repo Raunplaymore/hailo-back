@@ -15,6 +15,7 @@ node server.js
 ## API
 - `POST /api/upload` : `multipart/form-data` 필드명 `video` 로 업로드. 응답 `{ ok: true, file: "<저장파일명>" }`
 - `GET /api/files` : 업로드된 파일 목록 배열 반환
+- `DELETE /api/files/:name` : 파일 삭제. 경로 이스케이프 방지 적용.
 
 ## PM2 운영
 - 전역 설치: `npm i -g pm2`
