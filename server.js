@@ -6,10 +6,7 @@ const path = require('path');
 const { randomUUID } = require('crypto');
 const {
   buildFrameSequenceFromFile,
-  swingAnalysis,
-  ballFlightAnalysis,
-  shotTypeClassifier,
-  coachSummaryGenerator,
+  analyzeFrameSequence,
 } = require('./analysis/engine');
 const shotStore = require('./store/shotStore');
 
@@ -51,15 +48,11 @@ function toNumberOrUndefined(value) {
 }
 
 function buildAnalysisFromFrames(frameSeq) {
-  const swing = swingAnalysis(frameSeq);
-  const ballFlight = ballFlightAnalysis(frameSeq);
-  const shotType = shotTypeClassifier({ swing, ballFlight });
-  const coachSummary = coachSummaryGenerator({ swing, ballFlight, shotType });
-  return { swing, ballFlight, shot_type: shotType, coach_summary: coachSummary };
+  return analyzeFrameSequence(frameSeq);
 }
 
 // Analyze uploaded video and store shot result
-app.post('/analyze/upload', upload.single('video'), (req, res) => {
+app.post('/analyze/upload', upload.single('video'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ ok: false, message: 'No file uploaded' });
   }
@@ -68,11 +61,18 @@ app.post('/analyze/upload', upload.single('video'), (req, res) => {
     club: req.body.club,
     fps: toNumberOrUndefined(req.body.fps),
     cameraConfig: req.body.cameraConfig,
+    roi: req.body.roi,
     sourceType: 'upload',
   };
 
   const frameSeq = buildFrameSequenceFromFile(req.file.path, meta);
-  const analysis = buildAnalysisFromFrames(frameSeq);
+  let analysis;
+  try {
+    analysis = await buildAnalysisFromFrames(frameSeq);
+  } catch (err) {
+    console.error('analyze/upload failed', err);
+    return res.status(500).json({ ok: false, message: 'Analysis failed' });
+  }
 
   const sessionId = shotStore.ensureSessionPersisted(
     req.body.sessionId,
@@ -99,7 +99,7 @@ app.post('/analyze/upload', upload.single('video'), (req, res) => {
 });
 
 // Register a shot from camera pipeline (metadata only placeholder)
-app.post('/shots', (req, res) => {
+app.post('/shots', async (req, res) => {
   const payload = req.body || {};
   const sessionId = shotStore.ensureSessionPersisted(
     payload.sessionId,
@@ -115,7 +115,13 @@ app.post('/shots', (req, res) => {
     frames: [],
   };
 
-  const analysis = buildAnalysisFromFrames(frameSeq);
+  let analysis;
+  try {
+    analysis = await buildAnalysisFromFrames(frameSeq);
+  } catch (err) {
+    console.error('shots analysis failed', err);
+    return res.status(500).json({ ok: false, message: 'Analysis failed' });
+  }
 
   const shot = {
     id: randomUUID(),

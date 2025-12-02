@@ -27,6 +27,10 @@ node server.js
   - `GET /shots/{id}/analysis` : 샷 분석 결과 반환.
   - 분석 스키마: 스윙/볼 플라이트/샷 타입/코치 코멘트 포함. 현재는 스텁 값이며, 향후 OpenCV/ML 기반 엔진으로 교체 가능.
 
+### OpenCV/ML 워커(스텁)
+- `analysis/opencv_worker.py` : stdin(JSON: `{ path, fps?, roi? }`) → stdout(분석 JSON) 형태의 워커 스텁. Pi에서 OpenCV/ONNX/TFLite 로직으로 대체 가능.
+- `analysis/engine.js` : Node에서 Python 워커를 호출하고 실패 시 스텁 값으로 폴백.
+
 ## PM2 운영
 
 - 전역 설치: `npm i -g pm2`
