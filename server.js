@@ -52,7 +52,7 @@ function buildAnalysisFromFrames(frameSeq) {
 }
 
 // Analyze uploaded video and store shot result
-app.post('/analyze/upload', upload.single('video'), async (req, res) => {
+const analyzeUploadHandler = async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ ok: false, message: 'No file uploaded' });
   }
@@ -96,10 +96,12 @@ app.post('/analyze/upload', upload.single('video'), async (req, res) => {
 
   shotStore.addShot(shot);
   res.json({ ok: true, shot });
-});
+};
+app.post('/analyze/upload', upload.single('video'), analyzeUploadHandler);
+app.post('/api/analyze/upload', upload.single('video'), analyzeUploadHandler);
 
 // Register a shot from camera pipeline (metadata only placeholder)
-app.post('/shots', async (req, res) => {
+const createShotHandler = async (req, res) => {
   const payload = req.body || {};
   const sessionId = shotStore.ensureSessionPersisted(
     payload.sessionId,
@@ -139,29 +141,37 @@ app.post('/shots', async (req, res) => {
 
   shotStore.addShot(shot);
   res.json({ ok: true, shot });
-});
+};
+app.post('/shots', createShotHandler);
+app.post('/api/shots', createShotHandler);
 
-app.get('/sessions', (_req, res) => {
+const listSessionsHandler = (_req, res) => {
   const sessions = shotStore.listSessions();
   res.json({ ok: true, sessions });
-});
+};
+app.get('/sessions', listSessionsHandler);
+app.get('/api/sessions', listSessionsHandler);
 
-app.get('/sessions/:id', (req, res) => {
+const getSessionHandler = (req, res) => {
   const session = shotStore.getSession(req.params.id);
   if (!session) {
     return res.status(404).json({ ok: false, message: 'Session not found' });
   }
   const shots = shotStore.listShotsBySession(req.params.id);
   res.json({ ok: true, session, shots });
-});
+};
+app.get('/sessions/:id', getSessionHandler);
+app.get('/api/sessions/:id', getSessionHandler);
 
-app.get('/shots/:id/analysis', (req, res) => {
+const getShotAnalysisHandler = (req, res) => {
   const shot = shotStore.getShot(req.params.id);
   if (!shot) {
     return res.status(404).json({ ok: false, message: 'Shot not found' });
   }
   res.json({ ok: true, analysis: shot.analysis });
-});
+};
+app.get('/shots/:id/analysis', getShotAnalysisHandler);
+app.get('/api/shots/:id/analysis', getShotAnalysisHandler);
 
 // Upload endpoint: expects multipart/form-data with field "video"
 app.post('/api/upload', upload.single('video'), (req, res) => {
