@@ -202,6 +202,24 @@ app.get('/api/files', (_req, res) => {
   });
 });
 
+// List uploaded files with analysis metadata (non-breaking; new endpoint)
+app.get('/api/files/detail', async (_req, res) => {
+  try {
+    const files = await fs.promises.readdir(uploadDir);
+    const withAnalysis = files.map((filename) => {
+      const shot = shotStore.getShotByMediaName(filename);
+      return {
+        filename,
+        shotId: shot?.id,
+        analysis: shot?.analysis || null,
+      };
+    });
+    res.json({ ok: true, files: withAnalysis });
+  } catch (err) {
+    res.status(500).json({ ok: false, message: err.message });
+  }
+});
+
 // Delete a file by name
 app.delete('/api/files/:name', async (req, res) => {
   const resolvedUpload = path.resolve(uploadDir);
