@@ -8,8 +8,7 @@ const app = express();
 const PORT = 3000;
 // Default to local uploads directory; allow override for Raspberry Pi via env
 const uploadDir =
-  process.env.UPLOAD_DIR ||
-  (fs.existsSync('/home/ray/uploads') ? '/home/ray/uploads' : path.join(__dirname, 'uploads'));
+  process.env.UPLOAD_DIR || path.join(__dirname, 'uploads');
 
 // Ensure upload directory exists
 fs.mkdirSync(uploadDir, { recursive: true });
