@@ -147,6 +147,13 @@ const createShotHandler = async (req, res) => {
 app.post('/shots', createShotHandler);
 app.post('/api/shots', createShotHandler);
 
+const listShotsHandler = (_req, res) => {
+  const shots = shotStore.listShots();
+  res.json({ ok: true, shots });
+};
+app.get('/shots', listShotsHandler);
+app.get('/api/shots', listShotsHandler);
+
 const listSessionsHandler = (_req, res) => {
   const sessions = shotStore.listSessions();
   res.json({ ok: true, sessions });
@@ -166,11 +173,13 @@ app.get('/sessions/:id', getSessionHandler);
 app.get('/api/sessions/:id', getSessionHandler);
 
 const getShotAnalysisHandler = (req, res) => {
-  const shot = shotStore.getShot(req.params.id);
+  const shot =
+    shotStore.getShot(req.params.id) ||
+    shotStore.getShotByMediaName(req.params.id);
   if (!shot) {
     return res.status(404).json({ ok: false, message: 'Shot not found' });
   }
-  res.json({ ok: true, analysis: shot.analysis });
+  res.json({ ok: true, id: shot.id, analysis: shot.analysis });
 };
 app.get('/shots/:id/analysis', getShotAnalysisHandler);
 app.get('/api/shots/:id/analysis', getShotAnalysisHandler);

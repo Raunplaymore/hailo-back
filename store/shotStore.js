@@ -54,6 +54,11 @@ function listSessions() {
   return store.sessions;
 }
 
+function listShots() {
+  const store = loadStore();
+  return store.shots;
+}
+
 function getSession(id) {
   const store = loadStore();
   return store.sessions.find((s) => s.id === id);
@@ -69,14 +74,21 @@ function getShot(id) {
   return store.shots.find((s) => s.id === id);
 }
 
+function getShotByMediaName(name) {
+  const store = loadStore();
+  return store.shots.find((s) => s.media?.filename === name);
+}
+
 module.exports = {
   loadStore,
   saveStore,
   ensureSession,
   ensureSessionPersisted,
   addShot,
+  listShots,
   listSessions,
   getSession,
   listShotsBySession,
   getShot,
+  getShotByMediaName,
 };
