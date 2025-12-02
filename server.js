@@ -3,12 +3,22 @@ const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
+const { randomUUID } = require('crypto');
+const {
+  buildFrameSequenceFromFile,
+  swingAnalysis,
+  ballFlightAnalysis,
+  shotTypeClassifier,
+  coachSummaryGenerator,
+} = require('./analysis/engine');
+const shotStore = require('./store/shotStore');
 
 const app = express();
 const PORT = 3000;
 // Default to local uploads directory; allow override for Raspberry Pi via env
 const uploadDir =
-  process.env.UPLOAD_DIR || path.join(__dirname, 'uploads');
+  process.env.UPLOAD_DIR ||
+  (fs.existsSync('/home/ray/uploads') ? '/home/ray/uploads' : path.join(__dirname, 'uploads'));
 
 // Ensure upload directory exists
 fs.mkdirSync(uploadDir, { recursive: true });
@@ -16,7 +26,8 @@ fs.mkdirSync(uploadDir, { recursive: true });
 // Configure multer storage: timestamp prefix keeps uploads unique
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, uploadDir),
-  filename: (_req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
+  filename: (_req, file, cb) =>
+    cb(null, `${Date.now()}-${randomUUID()}-${file.originalname}`),
 });
 
 const upload = multer({ storage });
@@ -32,6 +43,118 @@ app.use((req, res, next) => {
     return res.sendStatus(204);
   }
   next();
+});
+
+function toNumberOrUndefined(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function buildAnalysisFromFrames(frameSeq) {
+  const swing = swingAnalysis(frameSeq);
+  const ballFlight = ballFlightAnalysis(frameSeq);
+  const shotType = shotTypeClassifier({ swing, ballFlight });
+  const coachSummary = coachSummaryGenerator({ swing, ballFlight, shotType });
+  return { swing, ballFlight, shot_type: shotType, coach_summary: coachSummary };
+}
+
+// Analyze uploaded video and store shot result
+app.post('/analyze/upload', upload.single('video'), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ ok: false, message: 'No file uploaded' });
+  }
+
+  const meta = {
+    club: req.body.club,
+    fps: toNumberOrUndefined(req.body.fps),
+    cameraConfig: req.body.cameraConfig,
+    sourceType: 'upload',
+  };
+
+  const frameSeq = buildFrameSequenceFromFile(req.file.path, meta);
+  const analysis = buildAnalysisFromFrames(frameSeq);
+
+  const sessionId = shotStore.ensureSessionPersisted(
+    req.body.sessionId,
+    req.body.sessionName || 'default',
+    { sourceType: 'upload' },
+  );
+
+  const shot = {
+    id: randomUUID(),
+    sessionId,
+    sourceType: 'upload',
+    createdAt: new Date().toISOString(),
+    media: {
+      filename: req.file.filename,
+      path: req.file.path,
+      size: req.file.size,
+    },
+    metadata: meta,
+    analysis,
+  };
+
+  shotStore.addShot(shot);
+  res.json({ ok: true, shot });
+});
+
+// Register a shot from camera pipeline (metadata only placeholder)
+app.post('/shots', (req, res) => {
+  const payload = req.body || {};
+  const sessionId = shotStore.ensureSessionPersisted(
+    payload.sessionId,
+    payload.sessionName || 'camera-session',
+    { sourceType: payload.sourceType || 'camera' },
+  );
+
+  const frameSeq = {
+    id: randomUUID(),
+    sourceType: payload.sourceType || 'camera',
+    fps: toNumberOrUndefined(payload.fps),
+    camera: payload.cameraConfig || {},
+    frames: [],
+  };
+
+  const analysis = buildAnalysisFromFrames(frameSeq);
+
+  const shot = {
+    id: randomUUID(),
+    sessionId,
+    sourceType: payload.sourceType || 'camera',
+    createdAt: new Date().toISOString(),
+    media: payload.media || {},
+    metadata: {
+      club: payload.club,
+      fps: frameSeq.fps,
+      cameraConfig: payload.cameraConfig,
+    },
+    analysis,
+  };
+
+  shotStore.addShot(shot);
+  res.json({ ok: true, shot });
+});
+
+app.get('/sessions', (_req, res) => {
+  const sessions = shotStore.listSessions();
+  res.json({ ok: true, sessions });
+});
+
+app.get('/sessions/:id', (req, res) => {
+  const session = shotStore.getSession(req.params.id);
+  if (!session) {
+    return res.status(404).json({ ok: false, message: 'Session not found' });
+  }
+  const shots = shotStore.listShotsBySession(req.params.id);
+  res.json({ ok: true, session, shots });
+});
+
+app.get('/shots/:id/analysis', (req, res) => {
+  const shot = shotStore.getShot(req.params.id);
+  if (!shot) {
+    return res.status(404).json({ ok: false, message: 'Shot not found' });
+  }
+  res.json({ ok: true, analysis: shot.analysis });
 });
 
 // Upload endpoint: expects multipart/form-data with field "video"
