@@ -26,6 +26,7 @@ node server.js
   - `GET /sessions/{id}` : 세션 상세+샷 목록.
   - `GET /shots/{id}/analysis` : 샷 분석 결과 반환.
   - 분석 스키마: 스윙/볼 플라이트/샷 타입/코치 코멘트 포함. 현재는 스텁 값이며, 향후 OpenCV/ML 기반 엔진으로 교체 가능.
+- 헬스체크: `GET /health/ok.txt` (정적 파일) 로 백엔드 생존 여부 확인 가능.
 
 ### OpenCV/ML 워커(스텁)
 - `analysis/opencv_worker.py` : stdin(JSON: `{ path, fps?, roi? }`) → stdout(분석 JSON) 형태의 워커 스텁. Pi에서 OpenCV/ONNX/TFLite 로직으로 대체 가능.

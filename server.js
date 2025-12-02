@@ -16,9 +16,11 @@ const PORT = 3000;
 const uploadDir =
   process.env.UPLOAD_DIR ||
   (fs.existsSync('/home/ray/uploads') ? '/home/ray/uploads' : path.join(__dirname, 'uploads'));
+const healthDir = path.join(__dirname, 'health');
 
 // Ensure upload directory exists
 fs.mkdirSync(uploadDir, { recursive: true });
+fs.mkdirSync(healthDir, { recursive: true });
 
 // Configure multer storage: timestamp prefix keeps uploads unique
 const storage = multer.diskStorage({
@@ -214,6 +216,8 @@ app.delete('/api/files/:name', async (req, res) => {
 
 // Serve uploaded files statically; fallthrough false to avoid SPA fallback on 404
 app.use('/uploads', express.static(uploadDir, { fallthrough: false }));
+// Health check folder so frontend can verify backend availability
+app.use('/health', express.static(healthDir, { fallthrough: false }));
 
 // Serve built React app
 app.use(express.static(path.join(__dirname, 'client-dist')));
