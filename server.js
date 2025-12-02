@@ -72,6 +72,9 @@ app.delete('/api/files/:name', async (req, res) => {
   }
 });
 
+// Serve uploaded files statically
+app.use('/uploads', express.static(uploadDir));
+
 // Serve built React app
 app.use(express.static(path.join(__dirname, 'client-dist')));
 
