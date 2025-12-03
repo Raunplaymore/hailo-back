@@ -53,32 +53,22 @@ function buildAnalysisFromFrames(frameSeq) {
   return analyzeFrameSequence(frameSeq);
 }
 
-// Analyze uploaded video and store shot result
-const analyzeUploadHandler = async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ ok: false, message: 'No file uploaded' });
-  }
-
+async function analyzeAndStoreUploadedShot(file, body) {
   const meta = {
-    club: req.body.club,
-    fps: toNumberOrUndefined(req.body.fps),
-    cameraConfig: req.body.cameraConfig,
-    roi: req.body.roi,
+    club: body.club,
+    fps: toNumberOrUndefined(body.fps),
+    cameraConfig: body.cameraConfig,
+    roi: body.roi,
     sourceType: 'upload',
   };
 
-  const frameSeq = buildFrameSequenceFromFile(req.file.path, meta);
+  const frameSeq = buildFrameSequenceFromFile(file.path, meta);
   let analysis;
-  try {
-    analysis = await buildAnalysisFromFrames(frameSeq);
-  } catch (err) {
-    console.error('analyze/upload failed', err);
-    return res.status(500).json({ ok: false, message: 'Analysis failed' });
-  }
+  analysis = await buildAnalysisFromFrames(frameSeq);
 
   const sessionId = shotStore.ensureSessionPersisted(
-    req.body.sessionId,
-    req.body.sessionName || 'default',
+    body.sessionId,
+    body.sessionName || 'default',
     { sourceType: 'upload' },
   );
 
@@ -88,16 +78,31 @@ const analyzeUploadHandler = async (req, res) => {
     sourceType: 'upload',
     createdAt: new Date().toISOString(),
     media: {
-      filename: req.file.filename,
-      path: req.file.path,
-      size: req.file.size,
+      filename: file.filename,
+      path: file.path,
+      size: file.size,
     },
     metadata: meta,
     analysis,
   };
 
   shotStore.addShot(shot);
-  res.json({ ok: true, shot });
+  return shot;
+}
+
+// Analyze uploaded video and store shot result
+const analyzeUploadHandler = async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ ok: false, message: 'No file uploaded' });
+  }
+
+  try {
+    const shot = await analyzeAndStoreUploadedShot(req.file, req.body);
+    res.json({ ok: true, shot });
+  } catch (err) {
+    console.error('analyze/upload failed', err);
+    res.status(500).json({ ok: false, message: 'Analysis failed' });
+  }
 };
 app.post('/analyze/upload', upload.single('video'), analyzeUploadHandler);
 app.post('/api/analyze/upload', upload.single('video'), analyzeUploadHandler);
@@ -201,11 +206,23 @@ app.get('/shots/:id/analysis', getShotAnalysisHandler);
 app.get('/api/shots/:id/analysis', getShotAnalysisHandler);
 
 // Upload endpoint: expects multipart/form-data with field "video"
-app.post('/api/upload', upload.single('video'), (req, res) => {
+// If analyze=true (query or body), runs analysis and registers a shot.
+app.post('/api/upload', upload.single('video'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ ok: false, message: 'No file uploaded' });
   }
-  res.json({ ok: true, file: req.file.filename });
+  const shouldAnalyze =
+    req.query.analyze === 'true' || req.body?.analyze === 'true';
+  if (!shouldAnalyze) {
+    return res.json({ ok: true, file: req.file.filename });
+  }
+  try {
+    const shot = await analyzeAndStoreUploadedShot(req.file, req.body || {});
+    return res.json({ ok: true, file: req.file.filename, shot });
+  } catch (err) {
+    console.error('upload with analyze failed', err);
+    return res.status(500).json({ ok: false, message: 'Analysis failed' });
+  }
 });
 
 // List uploaded files
