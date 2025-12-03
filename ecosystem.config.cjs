@@ -8,6 +8,7 @@ module.exports = {
       name: 'hailo-back',
       script: path.join(repoDir, 'server.js'),
       cwd: repoDir,
+      exec_mode: 'fork',
       env: {
         PORT: 3000,
         // 로컬/기본 업로드 경로
