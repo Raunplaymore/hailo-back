@@ -53,6 +53,15 @@ function buildAnalysisFromFrames(frameSeq) {
   return analyzeFrameSequence(frameSeq);
 }
 
+function swingPathDirection(clubPathAngle) {
+  if (clubPathAngle === undefined || clubPathAngle === null) return 'unknown';
+  const angle = Number(clubPathAngle);
+  if (!Number.isFinite(angle)) return 'unknown';
+  if (angle > 3) return 'out-to-in';
+  if (angle < -3) return 'in-to-out';
+  return 'in-to-in';
+}
+
 function formatAnalysisForFrontend(raw) {
   if (!raw) return null;
   const swing = raw.swing || {};
@@ -66,6 +75,7 @@ function formatAnalysisForFrontend(raw) {
       shaft_angle_change_rate: swing.shaft_angle_change_rate,
       on_plane_ratio: swing.on_plane_ratio,
       plane_deviation_std: swing.plane_deviation_std,
+      path_direction: swingPathDirection(swing.club_path_angle),
     },
     low_point: {
       low_point_position_relative_to_ball: ball.low_point_position_relative_to_ball,
