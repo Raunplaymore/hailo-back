@@ -53,6 +53,51 @@ function buildAnalysisFromFrames(frameSeq) {
   return analyzeFrameSequence(frameSeq);
 }
 
+function formatAnalysisForFrontend(raw) {
+  if (!raw) return null;
+  const swing = raw.swing || {};
+  const ball = raw.ballFlight || {};
+  return {
+    ...raw,
+    swing_plane: {
+      club_path_angle: swing.club_path_angle,
+      downswing_path_curve: swing.downswing_path_curve,
+      shaft_forward_lean_at_impact: swing.shaft_forward_lean_at_impact,
+      shaft_angle_change_rate: swing.shaft_angle_change_rate,
+      on_plane_ratio: swing.on_plane_ratio,
+      plane_deviation_std: swing.plane_deviation_std,
+    },
+    low_point: {
+      low_point_position_relative_to_ball: ball.low_point_position_relative_to_ball,
+      low_point_depth: ball.low_point_depth,
+      attack_angle_category: ball.attack_angle_category,
+    },
+    tempo: {
+      backswing_time_ms: swing.backswing_time_ms,
+      downswing_time_ms: swing.downswing_time_ms,
+      tempo_ratio: swing.tempo_ratio,
+      acceleration_rate: swing.acceleration_rate,
+      max_clubhead_speed_frame_index: swing.max_clubhead_speed_frame_index,
+    },
+    impact: {
+      vertical_launch_angle: ball.vertical_launch_angle,
+      horizontal_launch_direction: ball.horizontal_launch_direction,
+      initial_velocity: ball.initial_velocity,
+      spin_bias: ball.spin_bias,
+      side_curve_intensity: ball.side_curve_intensity,
+      apex_height_relative: ball.apex_height_relative,
+      side_deviation: ball.side_deviation,
+      projected_carry_distance: ball.projected_carry_distance,
+    },
+    body_motion: {
+      head_movement: swing.head_movement,
+      upper_body_tilt_change: swing.upper_body_tilt_change,
+      shoulder_angle_at_address: swing.shoulder_angle_at_address,
+      shoulder_angle_at_impact: swing.shoulder_angle_at_impact,
+    },
+  };
+}
+
 async function analyzeAndStoreUploadedShot(file, body) {
   const meta = {
     club: body.club,
@@ -65,6 +110,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
   const frameSeq = buildFrameSequenceFromFile(file.path, meta);
   let analysis;
   analysis = await buildAnalysisFromFrames(frameSeq);
+  analysis = formatAnalysisForFrontend(analysis);
 
   const sessionId = shotStore.ensureSessionPersisted(
     body.sessionId,
@@ -127,6 +173,7 @@ const createShotHandler = async (req, res) => {
   let analysis;
   try {
     analysis = await buildAnalysisFromFrames(frameSeq);
+    analysis = formatAnalysisForFrontend(analysis);
   } catch (err) {
     console.error('shots analysis failed', err);
     return res.status(500).json({ ok: false, message: 'Analysis failed' });
@@ -265,6 +312,7 @@ app.delete('/api/files/:name', async (req, res) => {
 
   try {
     await fs.promises.unlink(target);
+    shotStore.removeShotByFilename(req.params.name);
     res.json({ ok: true });
   } catch (err) {
     if (err.code === 'ENOENT') {

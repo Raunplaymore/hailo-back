@@ -49,6 +49,11 @@ function addShot(shot) {
   return shot.id;
 }
 
+function cleanupOrphanSessions(store) {
+  const sessionIds = new Set(store.shots.map((s) => s.sessionId));
+  store.sessions = store.sessions.filter((s) => sessionIds.has(s.id));
+}
+
 function listSessions() {
   const store = loadStore();
   return store.sessions;
@@ -79,6 +84,30 @@ function getShotByMediaName(name) {
   return store.shots.find((s) => s.media?.filename === name);
 }
 
+function removeShotById(id) {
+  const store = loadStore();
+  const before = store.shots.length;
+  store.shots = store.shots.filter((s) => s.id !== id);
+  cleanupOrphanSessions(store);
+  if (store.shots.length !== before) {
+    saveStore(store);
+    return true;
+  }
+  return false;
+}
+
+function removeShotByFilename(filename) {
+  const store = loadStore();
+  const before = store.shots.length;
+  store.shots = store.shots.filter((s) => s.media?.filename !== filename);
+  cleanupOrphanSessions(store);
+  if (store.shots.length !== before) {
+    saveStore(store);
+    return true;
+  }
+  return false;
+}
+
 module.exports = {
   loadStore,
   saveStore,
@@ -91,4 +120,6 @@ module.exports = {
   listShotsBySession,
   getShot,
   getShotByMediaName,
+  removeShotById,
+  removeShotByFilename,
 };
