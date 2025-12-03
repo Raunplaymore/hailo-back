@@ -299,6 +299,9 @@ def main():
         prev_gray = None
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
         step = max(1, total_frames // 200) if total_frames else 3
+        # 간단한 페이즈 추정: 임팩트 이전 평균 모션/밝기 변화를 이용
+        impact_guess = impact_frame if impact_frame > 0 else total_frames // 2
+        impact_time_ms = impact_guess / fps * 1000 if fps else None
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -316,6 +319,20 @@ def main():
             motion_var = float(np.std(motions))
             bright_change = (brightness[-1] - brightness[0]) if len(brightness) > 1 else 0
             club_path_angle = round((avg_motion % 20) - 10, 2)
+
+            # 템포 휴리스틱: 임팩트 이전 모션 피크를 탑으로 가정
+            backswing_time_ms = None
+            downswing_time_ms = None
+            tempo_ratio = None
+            if fps and impact_time_ms is not None:
+                peak_idx = int(np.argmax(motions))
+                peak_time_ms = peak_idx / fps * 1000
+                if peak_time_ms < impact_time_ms:
+                    backswing_time_ms = max(0, peak_time_ms)
+                    downswing_time_ms = max(0, impact_time_ms - peak_time_ms)
+                    if downswing_time_ms > 0:
+                        tempo_ratio = round(backswing_time_ms / downswing_time_ms, 2)
+
             swing = {
                 "club_path_angle": club_path_angle,
                 "downswing_path_curve": round(min(1.0, motion_var / 50), 2),
@@ -323,9 +340,9 @@ def main():
                 "shaft_angle_change_rate": round(min(1.5, motion_var / 80), 2),
                 "on_plane_ratio": round(0.6 + min(0.4, avg_motion / 2550), 2),
                 "plane_deviation_std": round(motion_var / 100, 2),
-                "backswing_time_ms": None,
-                "downswing_time_ms": None,
-                "tempo_ratio": None,
+                "backswing_time_ms": backswing_time_ms,
+                "downswing_time_ms": downswing_time_ms,
+                "tempo_ratio": tempo_ratio,
                 "acceleration_rate": round(min(2.0, motion_var / 60), 2),
                 "max_clubhead_speed_frame_index": None,
                 "head_movement": {
