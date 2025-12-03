@@ -103,12 +103,14 @@ async function analyzeFrameSequence(frameSeq) {
     const result = await runPythonAnalysis(frameSeq);
     return result;
   } catch (err) {
-    console.warn('Python analysis failed, falling back to stub:', err.message);
-    const swing = swingAnalysis(frameSeq);
-    const ballFlight = ballFlightAnalysis(frameSeq);
-    const shot_type = shotTypeClassifier({ swing, ballFlight });
-    const coach_summary = coachSummaryGenerator({ swing, ballFlight, shotType: shot_type });
-    return { swing, ballFlight, shot_type, coach_summary };
+    console.warn('Python analysis failed:', err.message);
+    return {
+      swing: null,
+      ballFlight: null,
+      shot_type: 'unknown',
+      coach_summary: [`analysis failed: ${err.message}`],
+      analysis_id: randomUUID(),
+    };
   }
 }
 

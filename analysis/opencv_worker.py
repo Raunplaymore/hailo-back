@@ -13,9 +13,8 @@ import os
 try:
     import cv2  # type: ignore
     import numpy as np  # type: ignore
-except ImportError:
-    cv2 = None
-    np = None
+except ImportError as exc:
+    raise SystemExit(f"OpenCV/NumPy not available: {exc}")
 
 
 def pseudo_metrics_from_filesize(size_bytes: int):
@@ -63,9 +62,6 @@ def pseudo_metrics_from_filesize(size_bytes: int):
 
 
 def run_opencv_metrics(path, fps_hint=None, roi=None):
-    if cv2 is None or np is None:
-        raise RuntimeError("OpenCV/NumPy not available")
-
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise RuntimeError("Cannot open video")
@@ -155,31 +151,12 @@ def run_opencv_metrics(path, fps_hint=None, roi=None):
 
 
 def analyze(payload):
-    if cv2 is not None and np is not None:
-        try:
-            metrics = run_opencv_metrics(
-                payload.get("path"),
-                payload.get("fps"),
-                payload.get("roi"),
-            )
-            return {**metrics, "analysis_id": str(uuid.uuid4())}
-        except Exception as exc:
-            sys.stderr.write(f"opencv worker fallback: {exc}\n")
-
-    try:
-        stat = os.stat(payload.get("path"))
-        metrics = pseudo_metrics_from_filesize(stat.st_size)
-    except Exception:
-        metrics = pseudo_metrics_from_filesize(1)
-    return {
-        **metrics,
-        "shot_type": metrics["ballFlight"]["spin_bias"],
-        "coach_summary": [
-            "pseudo analysis (no cv2) for {path}".format(path=payload.get("path")),
-            "replace with real OpenCV/ML pipeline when ready",
-        ],
-        "analysis_id": str(uuid.uuid4()),
-    }
+    metrics = run_opencv_metrics(
+        payload.get("path"),
+        payload.get("fps"),
+        payload.get("roi"),
+    )
+    return {**metrics, "analysis_id": str(uuid.uuid4())}
 
 
 def main():
