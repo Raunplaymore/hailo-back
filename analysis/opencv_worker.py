@@ -327,11 +327,14 @@ def main():
             if fps and impact_time_ms is not None:
                 peak_idx = int(np.argmax(motions))
                 peak_time_ms = peak_idx / fps * 1000
-                if peak_time_ms < impact_time_ms:
-                    backswing_time_ms = max(0, peak_time_ms)
-                    downswing_time_ms = max(0, impact_time_ms - peak_time_ms)
-                    if downswing_time_ms > 0:
-                        tempo_ratio = round(backswing_time_ms / downswing_time_ms, 2)
+            if impact_time_ms is not None:
+                peak_time_ms = peak_time_ms if peak_time_ms > 0 else 0
+                # 피크가 임팩트 이후로 잡히면 임팩트의 60% 지점을 탑으로 가정
+                if peak_time_ms >= impact_time_ms:
+                    peak_time_ms = impact_time_ms * 0.6
+                backswing_time_ms = max(1, peak_time_ms)
+                downswing_time_ms = max(1, impact_time_ms - peak_time_ms)
+                tempo_ratio = round(backswing_time_ms / downswing_time_ms, 2)
 
             swing = {
                 "club_path_angle": club_path_angle,
