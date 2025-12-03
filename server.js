@@ -187,7 +187,13 @@ const getShotAnalysisHandler = (req, res) => {
         message: 'Analysis not found; file exists',
       });
     }
-    return res.status(404).json({ ok: false, message: 'Shot not found' });
+    // Gracefully return empty analysis to avoid frontend errors
+    return res.json({
+      ok: true,
+      id: req.params.id,
+      analysis: null,
+      message: 'Shot not found',
+    });
   }
   res.json({ ok: true, id: shot.id, analysis: shot.analysis });
 };
