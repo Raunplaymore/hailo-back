@@ -177,6 +177,16 @@ const getShotAnalysisHandler = (req, res) => {
     shotStore.getShot(req.params.id) ||
     shotStore.getShotByMediaName(req.params.id);
   if (!shot) {
+    // Fallback: if file exists but shot not stored yet, return analysis null
+    const candidatePath = path.resolve(uploadDir, req.params.id);
+    if (fs.existsSync(candidatePath)) {
+      return res.json({
+        ok: true,
+        id: req.params.id,
+        analysis: null,
+        message: 'Analysis not found; file exists',
+      });
+    }
     return res.status(404).json({ ok: false, message: 'Shot not found' });
   }
   res.json({ ok: true, id: shot.id, analysis: shot.analysis });
