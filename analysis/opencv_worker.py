@@ -275,11 +275,11 @@ def main():
     shot_shape = classify_shot(ha, curvature)
 
     ball = {
-        "vertical_launch_angle": round(la, 2),
-        "horizontal_launch_direction": round(ha, 2),
+        "vertical_launch_angle": round(la, 1),
+        "horizontal_launch_direction": round(ha, 1),
         "initial_velocity": None,
         "spin_bias": shot_shape if shot_shape in ("draw", "fade") else "neutral",
-        "side_curve_intensity": round(curvature, 4),
+        "side_curve_intensity": round(curvature, 1),
         "apex_height_relative": None,
         "side_deviation": None,
         "projected_carry_distance": None,
@@ -287,7 +287,7 @@ def main():
 
     coach = [
         f"impact frame: {impact_frame}, tracked {len(trajectory)} pts",
-        f"launch={la:.2f}°, horiz={ha:.2f}°, curve={curvature:.4f}, shot={shot_shape}",
+        f"launch={la:.1f}°, horiz={ha:.1f}°, curve={curvature:.1f}, shot={shot_shape}",
     ]
 
     # Swing metrics (heuristic motion-based)
