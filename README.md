@@ -1,40 +1,63 @@
-# hailo-back (Raspberry Pi Swing Upload Server)
+# hailo-back
+(Raspberry Pi Swing Upload & Analysis Server)
 
-간단한 Express 백엔드로 스윙 영상을 업로드하고 정적 프론트(`client-dist`)를 제공하는 서비스입니다. 기본 포트는 `3000`입니다.
+라즈베리파이에서 동작하는 **골프 스윙 영상 업로드/기본 분석 백엔드**입니다. 현재는 업로드와 간단한 OpenCV 기반 분석만 제공합니다. 향후에는 **비동기 Job 기반 분석 서버**로 확장할 계획입니다.
+
+## 현재 상태 vs. 계획
+- **현재(AS-IS)**: 업로드 수신, 정적 프론트 서빙, 간단한 분석(볼 발사각/방향·구질 추정, 모션 휴리스틱 기반 스윙 지표).
+- **계획(TO-BE)**: 업로드 → 분석 Job 생성/상태 관리, 안정적인 OpenCV/ML 파이프라인 연결, 스윙 이벤트/템포/클럽 트래킹 결과 제공.
+
+분석 정확도는 제한적입니다. 공/클럽 검출이 실패하거나 파라미터가 맞지 않으면 `null` 또는 신뢰도 낮은 값이 내려올 수 있습니다.
 
 ## 실행
-
 ```bash
 npm install
 node server.js
-# 또는 UPLOAD_DIR=/home/ray/uploads node server.js  # 라즈베리 파이 경로 사용 시
+# 또는 UPLOAD_DIR=/home/ray/uploads node server.js
 ```
-
+- 기본 포트: `3000`
 - 기본 업로드 경로: `./uploads` (없으면 자동 생성). `UPLOAD_DIR` 환경변수로 변경 가능.
-- 프론트 빌드가 있다면 `http://localhost:3000/`에서 확인할 수 있습니다.
+- 헬스 체크: `GET /health/ok.txt`
+- 프론트 빌드가 있으면 `http://localhost:3000/`에서 접근.
 
-## API
+## 주요 API
+- `POST /api/upload`  
+  - `multipart/form-data` 필드명 `video`  
+  - `?analyze=true`(query/body)로 업로드+분석을 한 번에 수행, 응답에 `shot`/`analysis` 포함  
+  - 분석 옵션(선택): `fps`, `roi`([x,y,w,h]), `cam_distance`, `cam_height`, `h_fov`, `v_fov`, `impact_frame`, `club`, `track_frames`
+- `POST /api/analyze/upload` : 업로드+분석 (동일 흐름)
+- `GET /api/files` : 파일명 배열
+- `GET /api/files/detail` : 파일명과 매핑된 샷/분석
+- `DELETE /api/files/:name` : 파일/샷/세션 메타 삭제
+- `GET /uploads/:name` : 업로드된 영상 정적 제공
+- 샷/세션:
+  - `GET /api/shots` : 샷 목록(+분석)
+  - `GET /api/shots/:id/analysis` : 샷 ID 또는 파일명으로 분석 조회 (없으면 `analysis:null`)
+  - `GET /api/sessions`, `GET /api/sessions/:id`
 
-- `POST /api/upload` : `multipart/form-data` 필드명 `video` 로 업로드. 응답 `{ ok: true, file: "<저장파일명>" }`
-- `GET /api/files` : 업로드된 파일 목록 배열 반환
-- `DELETE /api/files/:name` : 파일 삭제. 경로 이스케이프 방지 적용.
-- `GET /uploads/:name` : 업로드된 영상 정적 제공 (존재하지 않으면 404)
-- 분석/샷 관리(스펙 초안):
-  - `POST /analyze/upload` : 업로드와 동시에 분석 실행. 응답에 샷/분석 JSON 포함.
-  - `POST /shots` : 카메라 등 외부 파이프라인에서 메타데이터 기반 샷 등록.
-  - `GET /sessions` : 세션 목록 조회.
-  - `GET /sessions/{id}` : 세션 상세+샷 목록.
-  - `GET /shots/{id}/analysis` : 샷 분석 결과 반환.
-  - 분석 스키마: 스윙/볼 플라이트/샷 타입/코치 코멘트 포함. 현재는 스텁 값이며, 향후 OpenCV/ML 기반 엔진으로 교체 가능.
-- 헬스체크: `GET /health/ok.txt` (정적 파일) 로 백엔드 생존 여부 확인 가능.
+## 분석 스키마 (현 버전)
+- `ballFlight` / `impact`  
+  - `vertical_launch_angle`, `horizontal_launch_direction`, `spin_bias`(draw/fade/neutral), `side_curve_intensity`, `shot_type` 등  
+  - 일부 값은 검출 실패 시 `null`/`unknown`
+- `swing`  
+  - 모션 휴리스틱 기반 추정: `club_path_angle`, `on_plane_ratio`, `tempo_ratio` 등 (검출 실패 시 null 가능)
+- `coach_summary`  
+  - 임팩트 프레임, 추적 포인트 수, 계산된 각도/구질 등 텍스트
 
-### OpenCV/ML 워커(스텁)
-- `analysis/opencv_worker.py` : stdin(JSON: `{ path, fps?, roi? }`) → stdout(분석 JSON) 형태의 워커 스텁. Pi에서 OpenCV/ONNX/TFLite 로직으로 대체 가능.
-- `analysis/engine.js` : Node에서 Python 워커를 호출하고 실패 시 스텁 값으로 폴백.
+## OpenCV 워커
+- `analysis/opencv_worker.py`  
+  - 영상에서 공을 검출/임팩트 추정/궤적 계산 → 발사각/수평각/곡률/샷 타입 추정  
+  - 스윙 지표는 모션 휴리스틱으로 채움(정확도 제한). 실패 시 `analysis:null`과 에러 메시지.
+- `analysis/engine.js`  
+  - Node → Python 워커 호출, 실패 시 null + 에러 메시지 반환.
 
 ## PM2 운영
-
 - 전역 설치: `npm i -g pm2`
 - 시작: `pm2 start ecosystem.config.cjs --env production`
 - 부팅 자동시작: `pm2 save && pm2 startup`
-- 설정: `ecosystem.config.cjs`에서 `UPLOAD_DIR` 기본값(로컬 `./uploads`), production(`env_production`)에서 라즈베리 파이 경로 `/home/pi/uploads`를 사용하도록 되어 있습니다.
+- 설정: `UPLOAD_DIR`는 config/env_production에서 조정 가능.
+
+## 한계 및 주의
+- 분석 결과는 프로토타입 수준이며, 공/클럽 추적 실패 시 `null`이 내려옵니다.
+- 정확한 fps/FOV/ROI/거리 정보를 함께 주면 안정도가 높아집니다.
+- Job 큐/안정적인 ML 모델 연동은 추후 리팩토링 목표입니다.
