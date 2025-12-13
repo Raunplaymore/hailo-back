@@ -53,6 +53,71 @@ function buildAnalysisFromFrames(frameSeq) {
   return analyzeFrameSequence(frameSeq);
 }
 
+function buildJobAnalysisPayload(shot) {
+  const analysis = shot.analysis || {};
+  const swing = analysis.swing || {};
+  const ball = analysis.ballFlight || analysis.impact || {};
+
+  const launchDir = (() => {
+    const h = ball.horizontal_launch_direction;
+    if (h === null || h === undefined) return 'unknown';
+    if (h < -1) return 'left';
+    if (h > 1) return 'right';
+    return 'center';
+  })();
+
+  const tempoRatio =
+    swing.tempo_ratio === null || swing.tempo_ratio === undefined
+      ? null
+      : `${swing.tempo_ratio}:1`;
+
+  return {
+    jobId: shot.jobId,
+    status: shot.status || 'succeeded',
+    events: {
+      address: undefined,
+      top: undefined,
+      impact: analysis?.events?.impact,
+      finish: undefined,
+    },
+    metrics: {
+      tempo: {
+        backswingMs: swing.backswing_time_ms ?? null,
+        downswingMs: swing.downswing_time_ms ?? null,
+        ratio: tempoRatio,
+      },
+      eventTiming: {
+        address: null,
+        top: null,
+        impact: analysis?.events?.impact?.timeMs ?? null,
+        finish: null,
+      },
+      ball: {
+        launchDirection: launchDir,
+        launchAngle: ball.vertical_launch_angle ?? null,
+        speedRelative: 'unknown',
+      },
+    },
+    pending: [
+      { key: 'club_tracking', label: '클럽 추적', description: '향후 스윙 이벤트/클럽 경로', status: 'coming-soon' },
+    ],
+    errorMessage: analysis?.errorMessage,
+  };
+}
+
+function mapShotToFileEntry(shot) {
+  return {
+    id: shot.id,
+    filename: shot.media?.filename,
+    jobId: shot.jobId,
+    status: shot.status || 'succeeded',
+    createdAt: shot.createdAt,
+    sourceType: shot.sourceType || 'upload',
+    videoUrl: shot.media?.filename ? `/uploads/${shot.media.filename}` : undefined,
+    analysis: buildJobAnalysisPayload(shot),
+  };
+}
+
 function swingPathDirection(clubPathAngle) {
   if (clubPathAngle === undefined || clubPathAngle === null) return 'unknown';
   const angle = Number(clubPathAngle);
@@ -130,6 +195,8 @@ async function analyzeAndStoreUploadedShot(file, body) {
 
   const shot = {
     id: randomUUID(),
+    jobId: randomUUID(),
+    status: 'succeeded',
     sessionId,
     sourceType: 'upload',
     createdAt: new Date().toISOString(),
@@ -191,6 +258,8 @@ const createShotHandler = async (req, res) => {
 
   const shot = {
     id: randomUUID(),
+    jobId: randomUUID(),
+    status: 'succeeded',
     sessionId,
     sourceType: payload.sourceType || 'camera',
     createdAt: new Date().toISOString(),
@@ -208,6 +277,40 @@ const createShotHandler = async (req, res) => {
 };
 app.post('/shots', createShotHandler);
 app.post('/api/shots', createShotHandler);
+
+// New analyze job creation
+app.post('/api/analyze', upload.single('video'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded' });
+  }
+  const sourceType = req.body.sourceType || 'upload';
+  try {
+    const shot = await analyzeAndStoreUploadedShot(req.file, req.body || {});
+    shot.sourceType = sourceType;
+    shot.status = 'succeeded';
+    return res.json({ jobId: shot.jobId, filename: req.file.filename, status: shot.status });
+  } catch (err) {
+    console.error('analyze job failed', err);
+    return res.status(500).json({ error: 'Analysis failed' });
+  }
+});
+
+function respondJobStatus(req, res) {
+  const jobId = req.params.jobId;
+  const shot = shotStore.getShotByJobId(jobId);
+  if (!shot) {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+  const analysis = buildJobAnalysisPayload(shot);
+  return res.json({
+    jobId,
+    status: shot.status || 'succeeded',
+    analysis,
+  });
+}
+
+app.get('/api/analyze/:jobId', respondJobStatus);
+app.get('/api/analyze/:jobId/result', respondJobStatus);
 
 const listShotsHandler = (_req, res) => {
   const shots = shotStore.listShots();
@@ -284,12 +387,13 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
 
 // List uploaded files
 app.get('/api/files', (_req, res) => {
-  fs.readdir(uploadDir, (err, files) => {
-    if (err) {
-      return res.status(500).json({ ok: false, message: err.message });
-    }
-    res.json(files);
-  });
+  try {
+    const shots = shotStore.listShots();
+    const entries = shots.map(mapShotToFileEntry);
+    res.json(entries);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // List uploaded files with analysis metadata (non-breaking; new endpoint)
@@ -301,7 +405,7 @@ app.get('/api/files/detail', async (_req, res) => {
       return {
         filename,
         shotId: shot?.id,
-        analysis: shot?.analysis || null,
+        analysis: shot ? buildJobAnalysisPayload(shot) : null,
       };
     });
     res.json({ ok: true, files: withAnalysis });

@@ -84,6 +84,11 @@ function getShotByMediaName(name) {
   return store.shots.find((s) => s.media?.filename === name);
 }
 
+function getShotByJobId(jobId) {
+  const store = loadStore();
+  return store.shots.find((s) => s.jobId === jobId);
+}
+
 function removeShotById(id) {
   const store = loadStore();
   const before = store.shots.length;
@@ -120,6 +125,7 @@ module.exports = {
   listShotsBySession,
   getShot,
   getShotByMediaName,
+  getShotByJobId,
   removeShotById,
   removeShotByFilename,
 };
