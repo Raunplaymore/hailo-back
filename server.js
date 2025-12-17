@@ -396,19 +396,38 @@ app.get('/api/files', (_req, res) => {
   }
 });
 
-// List uploaded files with analysis metadata (non-breaking; new endpoint)
+// List uploaded mp4 files with analysis status so the frontend can show an "Analyze" button
 app.get('/api/files/detail', async (_req, res) => {
   try {
-    const files = await fs.promises.readdir(uploadDir);
-    const withAnalysis = files.map((filename) => {
-      const shot = shotStore.getShotByMediaName(filename);
-      return {
-        filename,
-        shotId: shot?.id,
-        analysis: shot ? buildJobAnalysisPayload(shot) : null,
-      };
-    });
-    res.json({ ok: true, files: withAnalysis });
+    const entries = await fs.promises.readdir(uploadDir, { withFileTypes: true });
+    const mp4Files = entries
+      .filter((ent) => ent.isFile() && path.extname(ent.name).toLowerCase() === '.mp4')
+      .map((ent) => ent.name);
+
+    const filesWithStatus = await Promise.all(
+      mp4Files.map(async (filename) => {
+        const shot = shotStore.getShotByMediaName(filename);
+        let stats;
+        try {
+          stats = await fs.promises.stat(path.join(uploadDir, filename));
+        } catch {
+          // ignore stat errors; keep lightweight listing
+        }
+        return {
+          filename,
+          url: `/uploads/${filename}`,
+          shotId: shot?.id || null,
+          jobId: shot?.jobId || null,
+          analyzed: Boolean(shot?.analysis),
+          status: shot?.status || (shot ? 'unknown' : 'not-analyzed'),
+          size: stats?.size,
+          modifiedAt: stats?.mtime?.toISOString(),
+          analysis: shot ? buildJobAnalysisPayload(shot) : null,
+        };
+      }),
+    );
+
+    res.json({ ok: true, files: filesWithStatus });
   } catch (err) {
     res.status(500).json({ ok: false, message: err.message });
   }
