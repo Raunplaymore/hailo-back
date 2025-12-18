@@ -17,6 +17,7 @@ node server.js
 ```
 - 기본 포트: `3000`
 - 기본 업로드 경로: `./uploads` (없으면 자동 생성). `UPLOAD_DIR` 환경변수로 변경 가능.
+- 샷/세션 저장 경로: 기본은 `./data`이며, 운영에서는 `DATA_DIR=/home/ray/data` 같은 외부 경로 사용을 권장합니다(배포 시 릴리즈 교체로 데이터가 사라지는 것을 방지).
 - 헬스 체크: `GET /health/ok.txt`
 - 프론트 빌드가 있으면 `http://localhost:3000/`에서 접근.
 

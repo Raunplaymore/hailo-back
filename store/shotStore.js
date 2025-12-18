@@ -2,7 +2,11 @@ const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
 
-const dataDir = path.join(__dirname, '..', 'data');
+const dataDir =
+  process.env.DATA_DIR ||
+  (fs.existsSync('/home/ray/data')
+    ? '/home/ray/data'
+    : path.join(__dirname, '..', 'data'));
 const storePath = path.join(dataDir, 'shots.json');
 
 fs.mkdirSync(dataDir, { recursive: true });
