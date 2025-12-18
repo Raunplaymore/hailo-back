@@ -26,14 +26,21 @@ node server.js
   - `?analyze=true`(query/body)로 업로드+분석을 한 번에 수행, 응답에 `shot`/`analysis` 포함  
   - 분석 옵션(선택): `fps`, `roi`([x,y,w,h]), `cam_distance`, `cam_height`, `h_fov`, `v_fov`, `impact_frame`, `club`, `track_frames`
 - `POST /api/analyze/upload` : 업로드+분석 (동일 흐름)
-- `GET /api/files` : 파일명 배열
-- `GET /api/files/detail` : 파일명과 매핑된 샷/분석
+- `POST /api/analyze/from-file` : 업로드 디렉토리의 기존 `.mp4`를 재업로드 없이 분석 트리거 (`{ filename, force? }`)
+- `GET /api/files/detail` : 업로드 디렉토리의 `.mp4` 목록 + 분석 여부/상태(프론트 표준)
+- `GET /api/files` : (레거시) 저장된 샷 목록 기반 엔트리
 - `DELETE /api/files/:name` : 파일/샷/세션 메타 삭제
 - `GET /uploads/:name` : 업로드된 영상 정적 제공
 - 샷/세션:
   - `GET /api/shots` : 샷 목록(+분석)
   - `GET /api/shots/:id/analysis` : 샷 ID 또는 파일명으로 분석 조회 (없으면 `analysis:null`)
   - `GET /api/sessions`, `GET /api/sessions/:id`
+
+## 파일 목록/상태 (프론트 표준)
+- `GET /api/files/detail`
+  - 응답: `{ ok: true, files: [{ filename, url, shotId, jobId, analyzed, status, size, modifiedAt, analysis }] }`
+  - `status`: `not-analyzed | queued | running | succeeded | failed`
+  - `analyzed`: `status === "succeeded"`일 때 `true`
 
 ## 분석 스키마 (현 버전)
 - `ballFlight` / `impact`  
@@ -47,9 +54,9 @@ node server.js
 ## OpenCV 워커
 - `analysis/opencv_worker.py`  
   - 영상에서 공을 검출/임팩트 추정/궤적 계산 → 발사각/수평각/곡률/샷 타입 추정  
-  - 스윙 지표는 모션 휴리스틱으로 채움(정확도 제한). 실패 시 `analysis:null`과 에러 메시지.
+  - 스윙 지표는 모션 휴리스틱으로 채움(정확도 제한). 실패 시 `swing/ballFlight:null` + `errorMessage`를 포함할 수 있음.
 - `analysis/engine.js`  
-  - Node → Python 워커 호출, 실패 시 null + 에러 메시지 반환.
+  - Node → Python 워커 호출, 실패 시 `errorMessage` 포함한 fallback 결과 반환.
 
 ## PM2 운영
 - 전역 설치: `npm i -g pm2`

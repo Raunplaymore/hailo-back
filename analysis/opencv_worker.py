@@ -252,6 +252,13 @@ def main():
 
     if len(trajectory) < 2:
         result = {
+            "errorMessage": "insufficient ball trajectory",
+            "events": {
+                "impact": {
+                    "frame": impact_frame,
+                    "timeMs": int(impact_frame / fps * 1000) if fps else None,
+                }
+            },
             "swing": None,
             "ballFlight": None,
             "shot_type": "unknown",
@@ -363,6 +370,12 @@ def main():
         sys.stderr.write(f"swing heuristics failed: {exc}\n")
 
     result = {
+        "events": {
+            "impact": {
+                "frame": impact_frame,
+                "timeMs": int(impact_frame / fps * 1000) if fps else None,
+            }
+        },
         "swing": swing,
         "ballFlight": ball,
         "shot_type": shot_shape,

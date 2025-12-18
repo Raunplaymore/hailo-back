@@ -49,6 +49,25 @@ function addShot(shot) {
   return shot.id;
 }
 
+function upsertShot(shot) {
+  const store = loadStore();
+  const targetFilename = shot.media?.filename;
+  const idx = store.shots.findIndex((s) => {
+    if (shot.id && s.id === shot.id) return true;
+    if (shot.jobId && s.jobId === shot.jobId) return true;
+    if (targetFilename && s.media?.filename === targetFilename) return true;
+    return false;
+  });
+
+  if (idx >= 0) {
+    store.shots[idx] = shot;
+  } else {
+    store.shots.push(shot);
+  }
+  saveStore(store);
+  return shot.id;
+}
+
 function cleanupOrphanSessions(store) {
   const sessionIds = new Set(store.shots.map((s) => s.sessionId));
   store.sessions = store.sessions.filter((s) => sessionIds.has(s.id));
@@ -119,6 +138,7 @@ module.exports = {
   ensureSession,
   ensureSessionPersisted,
   addShot,
+  upsertShot,
   listShots,
   listSessions,
   getSession,

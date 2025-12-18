@@ -105,6 +105,7 @@ async function analyzeFrameSequence(frameSeq) {
   } catch (err) {
     console.warn('Python analysis failed:', err.message);
     return {
+      errorMessage: err.message,
       swing: null,
       ballFlight: null,
       shot_type: 'unknown',

@@ -1,8 +1,6 @@
-알겠습니다.
-현재 구조를 유지하면서 **“업로드 서버 → 분석 Job 서버로 리팩토링 예정”**이라는 방향이 명확히 드러나도록,
-그리고 **지금 되는 것 / 앞으로 바뀔 것**이 구분되도록 `README.md`를 정리해서 업데이트해 드리겠습니다.
-
-아래 내용은 **백엔드 저장소의 최신 README로 그대로 교체해도 되는 버전**입니다.
+이 문서는 `hailo-back` 프로젝트를 위한 메모/프롬프트 모음입니다.
+- 1부: README 초안(현재 상태/향후 리팩토링 방향 정리)
+- 2부: 멀티 프로젝트(Hailo-front/Hailo-camera) 연동을 위해 `Hailo-back`에 전달할 요청 프롬프트
 
 ---
 
@@ -46,7 +44,7 @@ node server.js
 라즈베리파이 환경에서 업로드 경로를 명시하려면:
 
 ```bash
-UPLOAD_DIR=/home/pi/uploads node server.js
+UPLOAD_DIR=/home/ray/uploads node server.js
 ```
 
 ### 기본 설정
@@ -284,7 +282,7 @@ pm2 startup
   * 기본 업로드 경로: `./uploads`
   * production 환경:
 
-    * `/home/pi/uploads` 사용
+    * `/home/ray/uploads` 사용
 * 라즈베리파이 재부팅 후 자동 복구됨
 
 ---
@@ -315,3 +313,132 @@ pm2 startup
 * **라즈베리파이 기준 분석 성능 예산표**
 
 중에서 바로 이어서 정리해 드리겠습니다.
+
+---
+
+# ② Hailo-back 전달용 프롬프트
+*(중앙 허브 · 분석 · 상태 관리)*
+
+## 역할 정의 (Single Source of Truth)
+Hailo-back은 시스템의 중심입니다.
+
+- Hailo-camera ↔ Hailo-front 사이의 단일 진실 소스(SSOT)
+- 분석 Job 생성/실행/상태 관리
+- 파일/샷/세션/히스토리 관리
+- (권장) 프록시/인증/안정성 책임(모바일/핫스팟 환경 포함)
+
+---
+
+## 1) 파일/메타 API 표준 (Front 필수 의존)
+### API
+`GET /api/files/detail`
+
+### 응답 스펙(확정 요청)
+```json
+{
+  "ok": true,
+  "files": [
+    {
+      "filename": "xxx.mp4",
+      "url": "/uploads/xxx.mp4",
+      "shotId": "string | null",
+      "jobId": "string | null",
+      "analyzed": false,
+      "status": "not-analyzed | queued | running | succeeded | failed",
+      "size": 123,
+      "modifiedAt": "2025-12-18T01:13:42.951Z",
+      "analysis": null
+    }
+  ]
+}
+```
+
+### 요구사항
+- `.mp4`만 노출
+- `url`은 프론트가 그대로 `<video src>`로 사용 가능해야 함(동일 오리진)
+- `analyzed` 정의:
+  - `true`: 분석 결과가 유효하게 존재(“분석 완료”)
+  - `false`: 분석 결과 없음(“분석” 버튼 노출)
+- `status`는 아래 enum으로 반드시 통일:
+  - `not-analyzed | queued | running | succeeded | failed`
+- `analysis`는 `null` 가능(없으면 미분석 또는 실패로 처리)
+
+### 완료 기준
+- `/api/files/detail` 스펙이 위 형태로 고정되고, “미분석 파일도 목록에 포함”되며, `status` 값이 enum으로 통일됨.
+
+---
+
+## 2) 기존 파일 분석 트리거 API (중요 / 재업로드 제거)
+프론트에서 mp4를 다시 다운로드→업로드 없이, Pi에 이미 존재하는 파일을 서버 측에서 바로 분석 트리거할 수 있어야 합니다.
+
+### API
+`POST /api/analyze/from-file`
+```json
+{ "filename": "xxx.mp4" }
+```
+
+### 응답
+```json
+{ "ok": true, "jobId": "...", "filename": "xxx.mp4" }
+```
+
+### 권장 옵션(있으면 좋음)
+- `force: boolean` (기존 분석 결과가 있어도 재분석)
+- `sessionId/sessionName`, `meta(fps, roi, cameraConfig...)` 전달 지원
+
+### 완료 기준
+- 프론트 “분석” 버튼 클릭 시 재업로드 없이 job 생성이 가능하고,
+- job 완료 후 `/api/files/detail`의 `status/analyzed/analysis`가 즉시 일관되게 갱신됨.
+
+---
+
+## 3) 분석 Job 관리 (상태/이벤트)
+### 상태 흐름(고정)
+`not-analyzed → queued → running → succeeded | failed`
+
+### 상태 조회(최소)
+- `GET /api/analyze/{jobId}`
+- 응답에 `status` + (가능하면) `analysis` 또는 `errorMessage`
+
+### 실시간 업데이트(권장: SSE 또는 WS)
+SSE 선호(단순/방화벽 친화적):
+
+`GET /api/analyze/{jobId}/events` (SSE)
+
+- 이벤트 예시: `status_changed`, `progress`, `log`, `completed`, `failed`
+- 최소 요건: `queued/running/succeeded/failed` 전환을 push로 전달
+
+---
+
+## 4) 분석 결과 스펙 (In Scope 고정 / 범주형 우선)
+프론트가 “코칭/경향/추세”로 보여줄 수 있도록, 아래 항목을 `analysis.metrics`에 필수 포함하도록 스펙 확정 요청합니다.
+
+### 필수 포함
+- 스윙 이벤트: `address/top/impact/finish` (각 이벤트에 `timeMs`, 권장: `frame`)
+- 템포/리듬: `backswingMs`, `downswingMs`, `ratio`
+- 스윙 플레인 경향(범주형):
+  - `inside-out | neutral | outside-in`
+  - `confidence: 0~1`
+- 어택/패스(범주형 우선):
+  - 예: `down-blow | neutral | up-blow`
+
+### Out of Scope (명시적으로 제외)
+- 스핀(rpm) 정량
+- 비거리/볼비행 정밀 계산
+- 런치모니터급 정밀 볼스피드/발사각
+
+---
+
+## 5) 프록시/게이트웨이 (강력 권장)
+모바일/핫스팟 환경에서 CORS/토큰/브라우저 제약을 줄이기 위해, Hailo-back이 동일 오리진 게이트웨이를 제공하면 안정성이 크게 올라갑니다.
+
+- `/api/camera/*` → Hailo-camera로 reverse proxy
+- `/uploads/*` → static 또는 proxy로 동일 오리진 제공
+
+---
+
+## Hailo-back 측 답변 요청사항
+- 1~4의 확정 스펙(필드/enum/JSON 구조) 문서화
+- `POST /api/analyze/from-file`의 최종 요청/응답 및 에러 케이스(404, 409, 500 등)
+- 상태 push 방식 선택(SSE/WS) 및 최소 이벤트 페이로드 정의
+- job/이력 저장 범위(shotId/jobId/sessionId 매핑)와 보존 정책(최소 최근 N개 등) 제안
