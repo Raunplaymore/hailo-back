@@ -39,16 +39,23 @@ node server.js
 
 ## 파일 목록/상태 (프론트 표준)
 - `GET /api/files/detail`
-  - 응답: `{ ok: true, files: [{ filename, url, shotId, jobId, analyzed, status, size, modifiedAt, analysis }] }`
+  - 응답: `{ ok: true, files: [{ filename, url, shotId, jobId, analyzed, status, size, modifiedAt, analysis, errorCode?, errorMessage? }] }`
   - `status`: `not-analyzed | queued | running | succeeded | failed`
   - `analyzed`: `status === "succeeded"`일 때 `true`
   - `url`은 URL 인코딩된 경로를 내려주므로, 프론트는 `filename` 대신 `url`을 그대로 재생에 사용 권장
+  - 확장자: `.mp4`, `.mov`를 목록에 포함
 
 ## 프리체크 Abort (NOT_SWING)
 - 목적: 스윙 영상이 아닌 경우(정지/대기/오촬영 등) 무거운 분석을 돌리기 전에 조기 중단
 - 동작:
   - 프리체크 실패 시 `status="failed"`로 저장하고 `analysis.errorCode="NOT_SWING"` + 사용자용 `analysis.errorMessage` 반환
   - `force=true`면 프리체크를 무시하고 분석을 강제로 진행
+
+## iPhone `.mov` 업로드/분석
+- iPhone에서 업로드되는 영상은 `.mov`(HEVC/H.264)일 수 있습니다.
+- 목록: `.mov`도 `GET /api/files/detail`에 포함됩니다.
+- 분석: `.mov` 분석을 위해 서버가 필요 시 `.mp4`로 리먹스/트랜스코딩(ffmpeg)하여 분석할 수 있습니다.
+  - 변환/디코딩 실패 시 `status="failed"` + `errorCode="DECODE_FAILED"`로 구분합니다.
 
 ## 분석 스키마 (현 버전)
 - `ballFlight` / `impact`  

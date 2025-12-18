@@ -4,6 +4,7 @@ const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
+const { spawn } = require('child_process');
 const {
   buildFrameSequenceFromFile,
   analyzeFrameSequence,
@@ -53,6 +54,185 @@ function toNumberOrUndefined(value) {
 function uploadsUrl(filename) {
   if (!filename) return undefined;
   return `/uploads/${encodeURIComponent(filename)}`;
+}
+
+let ffmpegAvailability;
+let ffprobeAvailability;
+
+async function commandAvailable(command) {
+  return new Promise((resolve) => {
+    const proc = spawn(command, ['-version']);
+    proc.on('error', () => resolve(false));
+    proc.on('close', (code) => resolve(code === 0));
+  });
+}
+
+async function ensureFfmpegAvailability() {
+  if (ffmpegAvailability === undefined) {
+    ffmpegAvailability = await commandAvailable('ffmpeg');
+  }
+  if (ffprobeAvailability === undefined) {
+    ffprobeAvailability = await commandAvailable('ffprobe');
+  }
+  return { ffmpeg: ffmpegAvailability, ffprobe: ffprobeAvailability };
+}
+
+function isSupportedVideoExt(filename) {
+  const ext = path.extname(filename || '').toLowerCase();
+  return ext === '.mp4' || ext === '.mov';
+}
+
+function isDecodeErrorMessage(message) {
+  if (!message) return false;
+  const m = String(message).toLowerCase();
+  return (
+    m.includes('cannot open video') ||
+    m.includes('video file not found') ||
+    m.includes('moov atom not found') ||
+    m.includes('invalid data found') ||
+    m.includes('unsupported') ||
+    m.includes('decoder') ||
+    m.includes('could not find codec parameters')
+  );
+}
+
+async function runCommand(command, args, { timeoutMs = 30_000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(command, args);
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      try {
+        proc.kill('SIGKILL');
+      } catch {
+        // ignore
+      }
+      reject(new Error(`${command} timeout`));
+    }, timeoutMs);
+    proc.stdout.on('data', (d) => {
+      stdout += d.toString();
+    });
+    proc.stderr.on('data', (d) => {
+      stderr += d.toString();
+    });
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        return reject(new Error(stderr || `${command} exited with ${code}`));
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+async function getVideoCodecName(videoPath) {
+  const { ffprobe } = await ensureFfmpegAvailability();
+  if (!ffprobe) return null;
+  try {
+    const { stdout } = await runCommand(
+      'ffprobe',
+      [
+        '-v',
+        'error',
+        '-select_streams',
+        'v:0',
+        '-show_entries',
+        'stream=codec_name',
+        '-of',
+        'default=nw=1:nk=1',
+        videoPath,
+      ],
+      { timeoutMs: 5000 },
+    );
+    const codec = stdout.trim();
+    return codec || null;
+  } catch {
+    return null;
+  }
+}
+
+async function prepareVideoForAnalysis(originalPath, originalFilename) {
+  const ext = path.extname(originalFilename || originalPath || '').toLowerCase();
+  if (ext !== '.mov') {
+    return { ok: true, path: originalPath, converted: false };
+  }
+
+  const { ffmpeg } = await ensureFfmpegAvailability();
+  if (!ffmpeg) {
+    return {
+      ok: true,
+      path: originalPath,
+      converted: false,
+      warning: 'ffmpeg not available; analyzing .mov directly',
+    };
+  }
+
+  const convertedDir = path.join(uploadDir, '.converted');
+  await fs.promises.mkdir(convertedDir, { recursive: true });
+
+  const stats = await fs.promises.stat(originalPath);
+  const safeBase = path.basename(originalFilename, ext).replace(/[^\w.-]+/g, '_').slice(0, 60) || 'video';
+  const key = `${stats.mtimeMs}-${stats.size}`;
+  const outPath = path.join(convertedDir, `${safeBase}-${key}.mp4`);
+
+  if (fs.existsSync(outPath)) {
+    return { ok: true, path: outPath, converted: true, conversion: 'cached' };
+  }
+
+  const codec = await getVideoCodecName(originalPath);
+
+  // If codec is already h264, remux is fast and lossless; otherwise transcode for compatibility.
+  const shouldRemux = codec === 'h264' || codec === null;
+  if (shouldRemux) {
+    try {
+      await runCommand(
+        'ffmpeg',
+        ['-y', '-i', originalPath, '-c', 'copy', '-movflags', '+faststart', outPath],
+        { timeoutMs: 30_000 },
+      );
+      return { ok: true, path: outPath, converted: true, conversion: 'remux', codec };
+    } catch (err) {
+      // Fall through to transcode
+    }
+  }
+
+  try {
+    await runCommand(
+      'ffmpeg',
+      [
+        '-y',
+        '-i',
+        originalPath,
+        '-map',
+        '0:v:0',
+        '-map',
+        '0:a?',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '23',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        '-movflags',
+        '+faststart',
+        outPath,
+      ],
+      { timeoutMs: 120_000 },
+    );
+    return { ok: true, path: outPath, converted: true, conversion: 'transcode', codec };
+  } catch (err) {
+    return { ok: false, error: err.message, codec };
+  }
 }
 
 function toBoolean(value) {
@@ -238,7 +418,64 @@ async function analyzeAndStoreUploadedShot(file, body) {
     sourceType,
   };
 
-  const frameSeq = buildFrameSequenceFromFile(file.path, meta);
+  const prepared = await prepareVideoForAnalysis(file.path, file.filename);
+  if (prepared.ok === false) {
+    const sessionId = body.sessionId
+      ? shotStore.ensureSessionPersisted(
+          body.sessionId,
+          body.sessionName || 'default',
+          { sourceType },
+        )
+      : existing?.sessionId ||
+        shotStore.ensureSessionPersisted(
+          undefined,
+          body.sessionName || 'default',
+          { sourceType },
+        );
+
+    const analysis = {
+      errorCode: 'DECODE_FAILED',
+      errorMessage: `영상 디코딩/변환에 실패했습니다. (${prepared.error})`,
+      events: {
+        conversion: {
+          ok: false,
+          codec: prepared.codec ?? null,
+        },
+      },
+      swing: null,
+      ballFlight: null,
+      shot_type: 'unknown',
+      coach_summary: ['analysis failed: decode/convert failed'],
+      analysis_id: randomUUID(),
+    };
+    const shot = {
+      id: existing?.id || randomUUID(),
+      jobId: existing?.jobId || randomUUID(),
+      status: 'failed',
+      sessionId,
+      sourceType,
+      createdAt: existing?.createdAt || new Date().toISOString(),
+      media: {
+        filename: file.filename,
+        path: file.path,
+        size: file.size,
+      },
+      metadata: meta,
+      analysis,
+    };
+    shotStore.upsertShot(shot);
+    return shot;
+  }
+
+  const frameSeq = buildFrameSequenceFromFile(prepared.path, {
+    ...meta,
+    analysisInput: {
+      path: prepared.path,
+      converted: Boolean(prepared.converted),
+      conversion: prepared.conversion,
+      warning: prepared.warning,
+    },
+  });
   let analysis;
   let abortedByPrecheck = false;
   let precheckResult;
@@ -254,12 +491,26 @@ async function analyzeAndStoreUploadedShot(file, body) {
     });
     if (precheckResult?.ok === true && precheckResult?.isSwing === false) {
       abortedByPrecheck = true;
-      analysis = buildNotSwingAnalysis(precheckResult);
+      analysis = buildNotSwingAnalysis({
+        ...precheckResult,
+        conversion: prepared.converted ? { converted: true, conversion: prepared.conversion } : null,
+      });
     }
   }
   if (!abortedByPrecheck) {
     analysis = await buildAnalysisFromFrames(frameSeq);
     analysis = formatAnalysisForFrontend(analysis);
+    if (prepared.converted) {
+      analysis.events = analysis.events || {};
+      analysis.events.conversion = {
+        converted: true,
+        conversion: prepared.conversion,
+        warning: prepared.warning,
+      };
+    }
+    if (analysis && !analysis.errorCode && isDecodeErrorMessage(analysis.errorMessage)) {
+      analysis.errorCode = 'DECODE_FAILED';
+    }
   }
 
   const sessionId = body.sessionId
@@ -379,8 +630,8 @@ app.post('/api/analyze/from-file', async (req, res) => {
   if (!filename || typeof filename !== 'string') {
     return res.status(400).json({ ok: false, message: 'filename is required' });
   }
-  if (path.extname(filename).toLowerCase() !== '.mp4') {
-    return res.status(400).json({ ok: false, message: 'Only .mp4 is supported' });
+  if (!isSupportedVideoExt(filename)) {
+    return res.status(400).json({ ok: false, message: 'Only .mp4/.mov is supported' });
   }
 
   const resolvedUpload = path.resolve(uploadDir);
@@ -414,7 +665,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
         sourceType: req.body?.sourceType || existing?.sourceType || 'file',
       },
     );
-    return res.json({ ok: true, jobId: shot.jobId, filename, status: shot.status });
+    return res.json({ ok: true, jobId: shot.jobId, filename, url: uploadsUrl(filename), status: shot.status });
   } catch (err) {
     console.error('analyze/from-file failed', err);
     return res.status(500).json({ ok: false, message: 'Analysis failed' });
@@ -540,20 +791,21 @@ app.get('/api/files', (_req, res) => {
 app.get('/api/files/detail', async (_req, res) => {
   try {
     const entries = await fs.promises.readdir(uploadDir, { withFileTypes: true });
-    const mp4Files = entries
-      .filter((ent) => ent.isFile() && path.extname(ent.name).toLowerCase() === '.mp4')
+    const videoFiles = entries
+      .filter((ent) => ent.isFile() && isSupportedVideoExt(ent.name))
       .map((ent) => ent.name);
 
-	    const filesWithStatus = await Promise.all(
-	      mp4Files.map(async (filename) => {
-	        const shot = shotStore.getShotByMediaName(filename);
-	        let stats;
-	        try {
-	          stats = await fs.promises.stat(path.join(uploadDir, filename));
+    const filesWithStatus = await Promise.all(
+      videoFiles.map(async (filename) => {
+        const shot = shotStore.getShotByMediaName(filename);
+        let stats;
+        try {
+          stats = await fs.promises.stat(path.join(uploadDir, filename));
 	        } catch {
 	          // ignore stat errors; keep lightweight listing
 	        }
 	        const errorCode = shot?.analysis?.errorCode ?? null;
+	        const errorMessage = shot?.analysis?.errorMessage ?? null;
 	        return {
 	          filename,
 	          url: uploadsUrl(filename),
@@ -564,6 +816,7 @@ app.get('/api/files/detail', async (_req, res) => {
 	            normalizeJobStatus(shot?.status) ||
 	            (shot?.analysis ? (looksLikeAnalysisFailure(shot.analysis) ? 'failed' : 'succeeded') : 'not-analyzed'),
 	          errorCode,
+	          errorMessage,
 	          size: stats?.size,
 	          modifiedAt: stats?.mtime?.toISOString(),
 	          analysis: shot ? buildJobAnalysisPayload(shot) : null,
