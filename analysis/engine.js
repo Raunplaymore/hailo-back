@@ -3,6 +3,7 @@ const { randomUUID } = require('crypto');
 const { spawn } = require('child_process');
 
 const pythonWorkerPath = path.join(__dirname, 'opencv_worker.py');
+const pythonPrecheckPath = path.join(__dirname, 'precheck_worker.py');
 
 // Build a normalized frame sequence descriptor. This is a placeholder for
 // future OpenCV-based extraction.
@@ -97,6 +98,48 @@ async function runPythonAnalysis(frameSeq) {
   });
 }
 
+async function runPythonPrecheck(frameSeq, config = {}, timeoutMs = 1200) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('python3', [pythonPrecheckPath]);
+    let stdout = '';
+    let stderr = '';
+
+    const timer = setTimeout(() => {
+      try {
+        proc.kill('SIGKILL');
+      } catch {
+        // ignore
+      }
+      reject(new Error('precheck timeout'));
+    }, timeoutMs);
+
+    proc.stdout.on('data', (d) => {
+      stdout += d.toString();
+    });
+    proc.stderr.on('data', (d) => {
+      stderr += d.toString();
+    });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        return reject(new Error(stderr || `python precheck exited with ${code}`));
+      }
+      try {
+        resolve(JSON.parse(stdout));
+      } catch (err) {
+        reject(err);
+      }
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        path: frameSeq.path,
+        config,
+      }),
+    );
+    proc.stdin.end();
+  });
+}
+
 async function analyzeFrameSequence(frameSeq) {
   // Try python worker first; fallback to stubs on error
   try {
@@ -115,9 +158,22 @@ async function analyzeFrameSequence(frameSeq) {
   }
 }
 
+async function precheckSwingCandidate(frameSeq, config = {}) {
+  const timeoutMs =
+    typeof config.timeoutMs === 'number' ? config.timeoutMs : 1200;
+  const cfg = { ...config };
+  delete cfg.timeoutMs;
+  try {
+    return await runPythonPrecheck(frameSeq, cfg, timeoutMs);
+  } catch (err) {
+    return { ok: false, isSwing: true, reason: 'precheck_error', errorMessage: err.message };
+  }
+}
+
 module.exports = {
   buildFrameSequenceFromFile,
   analyzeFrameSequence,
+  precheckSwingCandidate,
   swingAnalysis,
   ballFlightAnalysis,
   shotTypeClassifier,

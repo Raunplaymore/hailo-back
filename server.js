@@ -7,6 +7,7 @@ const { randomUUID } = require('crypto');
 const {
   buildFrameSequenceFromFile,
   analyzeFrameSequence,
+  precheckSwingCandidate,
 } = require('./analysis/engine');
 const shotStore = require('./store/shotStore');
 
@@ -49,9 +50,17 @@ function toNumberOrUndefined(value) {
   return Number.isFinite(n) ? n : undefined;
 }
 
+function toBoolean(value) {
+  if (value === true) return true;
+  if (value === false) return false;
+  if (typeof value !== 'string') return false;
+  return value.toLowerCase() === 'true' || value === '1';
+}
+
 function looksLikeAnalysisFailure(analysis) {
   if (!analysis) return false;
   if (analysis.errorMessage) return true;
+  if (analysis.errorCode) return true;
   const coach = analysis.coach_summary;
   if (Array.isArray(coach)) {
     return coach.some(
@@ -70,6 +79,21 @@ function normalizeJobStatus(status) {
   if (v === 'error' || v === 'failure') return 'failed';
   if (v === 'not-analyzed' || v === 'not_analyzed') return 'not-analyzed';
   return undefined;
+}
+
+function buildNotSwingAnalysis(precheckResult) {
+  return {
+    errorCode: 'NOT_SWING',
+    errorMessage: '스윙 영상이 아닌 것 같아요. 다시 촬영해 주세요.',
+    events: {
+      precheck: precheckResult || null,
+    },
+    swing: null,
+    ballFlight: null,
+    shot_type: 'unknown',
+    coach_summary: ['NOT_SWING: aborted by precheck'],
+    analysis_id: randomUUID(),
+  };
 }
 
 function buildAnalysisFromFrames(frameSeq) {
@@ -97,6 +121,7 @@ function buildJobAnalysisPayload(shot) {
   return {
     jobId: shot.jobId,
     status: shot.status || 'succeeded',
+    errorCode: analysis?.errorCode ?? null,
     events: {
       address: null,
       top: null,
@@ -199,6 +224,7 @@ function formatAnalysisForFrontend(raw) {
 async function analyzeAndStoreUploadedShot(file, body) {
   const existing = shotStore.getShotByMediaName(file.filename);
   const sourceType = body.sourceType || existing?.sourceType || 'upload';
+  const force = toBoolean(body.force);
   const meta = {
     club: body.club,
     fps: toNumberOrUndefined(body.fps),
@@ -209,8 +235,27 @@ async function analyzeAndStoreUploadedShot(file, body) {
 
   const frameSeq = buildFrameSequenceFromFile(file.path, meta);
   let analysis;
-  analysis = await buildAnalysisFromFrames(frameSeq);
-  analysis = formatAnalysisForFrontend(analysis);
+  let abortedByPrecheck = false;
+  let precheckResult;
+  if (!force) {
+    precheckResult = await precheckSwingCandidate(frameSeq, {
+      timeoutMs: 1200,
+      sampleWindowSec: 1.0,
+      sampleFrames: 8,
+      minDurationSec: 0.6,
+      minFrames: 20,
+      motionThreshold: 2.0,
+      resizeWidth: 160,
+    });
+    if (precheckResult?.ok === true && precheckResult?.isSwing === false) {
+      abortedByPrecheck = true;
+      analysis = buildNotSwingAnalysis(precheckResult);
+    }
+  }
+  if (!abortedByPrecheck) {
+    analysis = await buildAnalysisFromFrames(frameSeq);
+    analysis = formatAnalysisForFrontend(analysis);
+  }
 
   const sessionId = body.sessionId
     ? shotStore.ensureSessionPersisted(
@@ -255,7 +300,10 @@ const analyzeUploadHandler = async (req, res) => {
   }
 
   try {
-    const shot = await analyzeAndStoreUploadedShot(req.file, req.body);
+    const shot = await analyzeAndStoreUploadedShot(req.file, {
+      ...(req.body || {}),
+      force: toBoolean(req.body?.force) || toBoolean(req.query?.force),
+    });
     res.json({ ok: true, shot });
   } catch (err) {
     console.error('analyze/upload failed', err);
@@ -303,7 +351,10 @@ app.post('/api/analyze', upload.single('video'), async (req, res) => {
     return res.status(400).json({ error: 'No file uploaded' });
   }
   try {
-    const shot = await analyzeAndStoreUploadedShot(req.file, req.body || {});
+    const shot = await analyzeAndStoreUploadedShot(req.file, {
+      ...(req.body || {}),
+      force: toBoolean(req.body?.force) || toBoolean(req.query?.force),
+    });
     return res.json({ jobId: shot.jobId, filename: req.file.filename, status: shot.status });
   } catch (err) {
     console.error('analyze job failed', err);
@@ -331,7 +382,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
   }
 
   const existing = shotStore.getShotByMediaName(filename);
-  const force = req.body?.force === true;
+  const force = req.body?.force === true || toBoolean(req.body?.force);
   if (!force && existing && normalizeJobStatus(existing.status) === 'succeeded' && existing.analysis) {
     return res.json({
       ok: true,
@@ -346,7 +397,11 @@ app.post('/api/analyze/from-file', async (req, res) => {
     const stats = await fs.promises.stat(target);
     const shot = await analyzeAndStoreUploadedShot(
       { filename, path: target, size: stats.size },
-      { ...(req.body || {}), sourceType: req.body?.sourceType || existing?.sourceType || 'file' },
+      {
+        ...(req.body || {}),
+        force: req.body?.force === true,
+        sourceType: req.body?.sourceType || existing?.sourceType || 'file',
+      },
     );
     return res.json({ ok: true, jobId: shot.jobId, filename, status: shot.status });
   } catch (err) {
@@ -437,7 +492,10 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
     return res.json({ ok: true, file: req.file.filename });
   }
   try {
-    const shot = await analyzeAndStoreUploadedShot(req.file, req.body || {});
+    const shot = await analyzeAndStoreUploadedShot(req.file, {
+      ...(req.body || {}),
+      force: toBoolean(req.body?.force) || toBoolean(req.query?.force),
+    });
     return res.json({ ok: true, file: req.file.filename, shot });
   } catch (err) {
     console.error('upload with analyze failed', err);
@@ -464,30 +522,32 @@ app.get('/api/files/detail', async (_req, res) => {
       .filter((ent) => ent.isFile() && path.extname(ent.name).toLowerCase() === '.mp4')
       .map((ent) => ent.name);
 
-    const filesWithStatus = await Promise.all(
-      mp4Files.map(async (filename) => {
-        const shot = shotStore.getShotByMediaName(filename);
-        let stats;
-        try {
-          stats = await fs.promises.stat(path.join(uploadDir, filename));
-        } catch {
-          // ignore stat errors; keep lightweight listing
-        }
-        return {
-          filename,
-          url: `/uploads/${filename}`,
-          shotId: shot?.id || null,
-          jobId: shot?.jobId || null,
-          analyzed: normalizeJobStatus(shot?.status) === 'succeeded',
-          status:
-            normalizeJobStatus(shot?.status) ||
-            (shot?.analysis ? (looksLikeAnalysisFailure(shot.analysis) ? 'failed' : 'succeeded') : 'not-analyzed'),
-          size: stats?.size,
-          modifiedAt: stats?.mtime?.toISOString(),
-          analysis: shot ? buildJobAnalysisPayload(shot) : null,
-        };
-      }),
-    );
+	    const filesWithStatus = await Promise.all(
+	      mp4Files.map(async (filename) => {
+	        const shot = shotStore.getShotByMediaName(filename);
+	        let stats;
+	        try {
+	          stats = await fs.promises.stat(path.join(uploadDir, filename));
+	        } catch {
+	          // ignore stat errors; keep lightweight listing
+	        }
+	        const errorCode = shot?.analysis?.errorCode ?? null;
+	        return {
+	          filename,
+	          url: `/uploads/${filename}`,
+	          shotId: shot?.id || null,
+	          jobId: shot?.jobId || null,
+	          analyzed: normalizeJobStatus(shot?.status) === 'succeeded',
+	          status:
+	            normalizeJobStatus(shot?.status) ||
+	            (shot?.analysis ? (looksLikeAnalysisFailure(shot.analysis) ? 'failed' : 'succeeded') : 'not-analyzed'),
+	          errorCode,
+	          size: stats?.size,
+	          modifiedAt: stats?.mtime?.toISOString(),
+	          analysis: shot ? buildJobAnalysisPayload(shot) : null,
+	        };
+	      }),
+	    );
 
     res.json({ ok: true, files: filesWithStatus });
   } catch (err) {

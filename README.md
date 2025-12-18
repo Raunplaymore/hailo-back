@@ -24,6 +24,7 @@ node server.js
 - `POST /api/upload`  
   - `multipart/form-data` 필드명 `video`  
   - `?analyze=true`(query/body)로 업로드+분석을 한 번에 수행, 응답에 `shot`/`analysis` 포함  
+  - `force=true`(query/body)면 프리체크 결과와 무관하게 분석 진행
   - 분석 옵션(선택): `fps`, `roi`([x,y,w,h]), `cam_distance`, `cam_height`, `h_fov`, `v_fov`, `impact_frame`, `club`, `track_frames`
 - `POST /api/analyze/upload` : 업로드+분석 (동일 흐름)
 - `POST /api/analyze/from-file` : 업로드 디렉토리의 기존 `.mp4`를 재업로드 없이 분석 트리거 (`{ filename, force? }`)
@@ -41,6 +42,12 @@ node server.js
   - 응답: `{ ok: true, files: [{ filename, url, shotId, jobId, analyzed, status, size, modifiedAt, analysis }] }`
   - `status`: `not-analyzed | queued | running | succeeded | failed`
   - `analyzed`: `status === "succeeded"`일 때 `true`
+
+## 프리체크 Abort (NOT_SWING)
+- 목적: 스윙 영상이 아닌 경우(정지/대기/오촬영 등) 무거운 분석을 돌리기 전에 조기 중단
+- 동작:
+  - 프리체크 실패 시 `status="failed"`로 저장하고 `analysis.errorCode="NOT_SWING"` + 사용자용 `analysis.errorMessage` 반환
+  - `force=true`면 프리체크를 무시하고 분석을 강제로 진행
 
 ## 분석 스키마 (현 버전)
 - `ballFlight` / `impact`  
