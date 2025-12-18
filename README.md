@@ -42,6 +42,7 @@ node server.js
   - 응답: `{ ok: true, files: [{ filename, url, shotId, jobId, analyzed, status, size, modifiedAt, analysis }] }`
   - `status`: `not-analyzed | queued | running | succeeded | failed`
   - `analyzed`: `status === "succeeded"`일 때 `true`
+  - `url`은 URL 인코딩된 경로를 내려주므로, 프론트는 `filename` 대신 `url`을 그대로 재생에 사용 권장
 
 ## 프리체크 Abort (NOT_SWING)
 - 목적: 스윙 영상이 아닌 경우(정지/대기/오촬영 등) 무거운 분석을 돌리기 전에 조기 중단

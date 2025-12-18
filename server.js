@@ -50,6 +50,11 @@ function toNumberOrUndefined(value) {
   return Number.isFinite(n) ? n : undefined;
 }
 
+function uploadsUrl(filename) {
+  if (!filename) return undefined;
+  return `/uploads/${encodeURIComponent(filename)}`;
+}
+
 function toBoolean(value) {
   if (value === true) return true;
   if (value === false) return false;
@@ -161,7 +166,7 @@ function mapShotToFileEntry(shot) {
     status: shot.status || 'succeeded',
     createdAt: shot.createdAt,
     sourceType: shot.sourceType || 'upload',
-    videoUrl: shot.media?.filename ? `/uploads/${shot.media.filename}` : undefined,
+    videoUrl: uploadsUrl(shot.media?.filename),
     analysis: buildJobAnalysisPayload(shot),
   };
 }
@@ -355,7 +360,13 @@ app.post('/api/analyze', upload.single('video'), async (req, res) => {
       ...(req.body || {}),
       force: toBoolean(req.body?.force) || toBoolean(req.query?.force),
     });
-    return res.json({ jobId: shot.jobId, filename: req.file.filename, status: shot.status });
+    return res.json({
+      ok: true,
+      jobId: shot.jobId,
+      filename: req.file.filename,
+      url: uploadsUrl(req.file.filename),
+      status: shot.status,
+    });
   } catch (err) {
     console.error('analyze job failed', err);
     return res.status(500).json({ error: 'Analysis failed' });
@@ -489,14 +500,25 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
   const shouldAnalyze =
     req.query.analyze === 'true' || req.body?.analyze === 'true';
   if (!shouldAnalyze) {
-    return res.json({ ok: true, file: req.file.filename });
+    return res.json({
+      ok: true,
+      file: req.file.filename,
+      url: uploadsUrl(req.file.filename),
+      originalName: req.file.originalname,
+    });
   }
   try {
     const shot = await analyzeAndStoreUploadedShot(req.file, {
       ...(req.body || {}),
       force: toBoolean(req.body?.force) || toBoolean(req.query?.force),
     });
-    return res.json({ ok: true, file: req.file.filename, shot });
+    return res.json({
+      ok: true,
+      file: req.file.filename,
+      url: uploadsUrl(req.file.filename),
+      originalName: req.file.originalname,
+      shot,
+    });
   } catch (err) {
     console.error('upload with analyze failed', err);
     return res.status(500).json({ ok: false, message: 'Analysis failed' });
@@ -534,7 +556,7 @@ app.get('/api/files/detail', async (_req, res) => {
 	        const errorCode = shot?.analysis?.errorCode ?? null;
 	        return {
 	          filename,
-	          url: `/uploads/${filename}`,
+	          url: uploadsUrl(filename),
 	          shotId: shot?.id || null,
 	          jobId: shot?.jobId || null,
 	          analyzed: normalizeJobStatus(shot?.status) === 'succeeded',
