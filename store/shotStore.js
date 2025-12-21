@@ -72,6 +72,24 @@ function upsertShot(shot) {
   return shot.id;
 }
 
+function updateShotFields(identifier, patch) {
+  const store = loadStore();
+  const idx = store.shots.findIndex(
+    (s) => s.id === identifier || s.jobId === identifier || s.media?.filename === identifier,
+  );
+  if (idx === -1) return null;
+  const merged = {
+    ...store.shots[idx],
+    ...patch,
+    media: { ...store.shots[idx].media, ...patch.media },
+    metadata: { ...store.shots[idx].metadata, ...patch.metadata },
+    analysis: patch.analysis !== undefined ? patch.analysis : store.shots[idx].analysis,
+  };
+  store.shots[idx] = merged;
+  saveStore(store);
+  return merged;
+}
+
 function cleanupOrphanSessions(store) {
   const sessionIds = new Set(store.shots.map((s) => s.sessionId));
   store.sessions = store.sessions.filter((s) => sessionIds.has(s.id));
@@ -143,6 +161,7 @@ module.exports = {
   ensureSessionPersisted,
   addShot,
   upsertShot,
+  updateShotFields,
   listShots,
   listSessions,
   getSession,

@@ -10,6 +10,7 @@ const {
   analyzeFrameSequence,
   precheckSwingCandidate,
 } = require('./analysis/engine');
+const opencvAnalyzer = require('./analyzers/opencvV1');
 const shotStore = require('./store/shotStore');
 
 const app = express();
@@ -79,7 +80,7 @@ async function ensureFfmpegAvailability() {
 
 function isSupportedVideoExt(filename) {
   const ext = path.extname(filename || '').toLowerCase();
-  return ext === '.mp4' || ext === '.mov';
+  return (ext === '.mp4' || ext === '.mov') && !filename.endsWith('.part');
 }
 
 function isDecodeErrorMessage(message) {
@@ -152,6 +153,44 @@ async function getVideoCodecName(videoPath) {
     return codec || null;
   } catch {
     return null;
+  }
+}
+
+async function getVideoMeta(videoPath) {
+  const { ffprobe } = await ensureFfmpegAvailability();
+  if (!ffprobe) return {};
+  try {
+    const { stdout } = await runCommand(
+      'ffprobe',
+      [
+        '-v',
+        'error',
+        '-select_streams',
+        'v:0',
+        '-show_entries',
+        'stream=codec_name,width,height,r_frame_rate',
+        '-show_entries',
+        'format=duration',
+        '-of',
+        'json',
+        videoPath,
+      ],
+      { timeoutMs: 5000 },
+    );
+    const parsed = JSON.parse(stdout);
+    const stream = parsed?.streams?.[0] || {};
+    const format = parsed?.format || {};
+    const [num, den] = String(stream.r_frame_rate || '0/1').split('/').map(Number);
+    const fps = den ? num / den : undefined;
+    const durationMs = format.duration ? Math.round(Number(format.duration) * 1000) : undefined;
+    return {
+      width: stream.width,
+      height: stream.height,
+      fps: Number.isFinite(fps) ? fps : undefined,
+      durationMs: Number.isFinite(durationMs) ? durationMs : undefined,
+    };
+  } catch {
+    return {};
   }
 }
 
@@ -268,6 +307,7 @@ function normalizeJobStatus(status) {
 
 function buildNotSwingAnalysis(precheckResult) {
   return {
+    analysisVersion: opencvAnalyzer.ANALYSIS_VERSION,
     errorCode: 'NOT_SWING',
     errorMessage: '스윙 영상이 아닌 것 같아요. 다시 촬영해 주세요.',
     events: {
@@ -306,6 +346,7 @@ function buildJobAnalysisPayload(shot) {
   return {
     jobId: shot.jobId,
     status: shot.status || 'succeeded',
+    analysisVersion: analysis?.analysisVersion,
     errorCode: analysis?.errorCode ?? null,
     events: {
       address: null,
@@ -335,6 +376,7 @@ function buildJobAnalysisPayload(shot) {
       { key: 'club_tracking', label: '클럽 추적', description: '향후 스윙 이벤트/클럽 경로', status: 'coming-soon' },
     ],
     errorMessage: analysis?.errorMessage,
+    meta: analysis?.meta,
   };
 }
 
@@ -434,6 +476,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
         );
 
     const analysis = {
+      analysisVersion: opencvAnalyzer.ANALYSIS_VERSION,
       errorCode: 'DECODE_FAILED',
       errorMessage: `영상 디코딩/변환에 실패했습니다. (${prepared.error})`,
       events: {
@@ -467,6 +510,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
     return shot;
   }
 
+  const videoMeta = await getVideoMeta(prepared.path);
   const frameSeq = buildFrameSequenceFromFile(prepared.path, {
     ...meta,
     analysisInput: {
@@ -498,8 +542,19 @@ async function analyzeAndStoreUploadedShot(file, body) {
     }
   }
   if (!abortedByPrecheck) {
-    analysis = await buildAnalysisFromFrames(frameSeq);
-    analysis = formatAnalysisForFrontend(analysis);
+    const analyzed = await opencvAnalyzer.analyze(frameSeq);
+    const formatted = formatAnalysisForFrontend(analyzed.raw);
+    analysis = {
+      ...formatted,
+      analysisVersion: opencvAnalyzer.ANALYSIS_VERSION,
+      meta: {
+        fps: videoMeta.fps ?? meta.fps,
+        width: videoMeta.width,
+        height: videoMeta.height,
+        durationMs: videoMeta.durationMs,
+      },
+      analysisDurationMs: analyzed.durationMs,
+    };
     if (prepared.converted) {
       analysis.events = analysis.events || {};
       analysis.events.conversion = {
@@ -541,7 +596,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
       path: file.path,
       size: file.size,
     },
-    metadata: meta,
+    metadata: { ...meta, video: videoMeta },
     analysis,
   };
 
@@ -645,24 +700,59 @@ app.post('/api/analyze/from-file', async (req, res) => {
 
   const existing = shotStore.getShotByMediaName(filename);
   const force = req.body?.force === true || toBoolean(req.body?.force);
-  if (!force && existing && normalizeJobStatus(existing.status) === 'succeeded' && existing.analysis) {
-    return res.json({
-      ok: true,
-      jobId: existing.jobId,
-      filename,
-      status: existing.status,
-      reused: true,
-    });
+  const existingStatus = normalizeJobStatus(existing?.status);
+  if (!force) {
+    if (existing && existingStatus === 'running') {
+      return res.json({
+        ok: true,
+        jobId: existing.jobId,
+        filename,
+        status: existing.status,
+        message: 'analysis already running',
+      });
+    }
+    if (existing && existingStatus === 'succeeded' && existing.analysis) {
+      return res.json({
+        ok: true,
+        jobId: existing.jobId,
+        filename,
+        status: existing.status,
+        reused: true,
+      });
+    }
   }
 
   try {
     const stats = await fs.promises.stat(target);
+    const jobId = existing?.jobId || randomUUID();
+    const sourceType = req.body?.sourceType || existing?.sourceType || 'file';
+    const sessionId =
+      existing?.sessionId ||
+      shotStore.ensureSessionPersisted(req.body?.sessionId, req.body?.sessionName || 'camera-session', {
+        sourceType,
+      });
+
+    const queuedShot = {
+      id: existing?.id || randomUUID(),
+      jobId,
+      status: 'queued',
+      sessionId,
+      sourceType,
+      createdAt: existing?.createdAt || new Date().toISOString(),
+      media: { filename, path: target, size: stats.size },
+      metadata: existing?.metadata || {},
+      analysis: existing?.analysis || null,
+    };
+    shotStore.upsertShot(queuedShot);
+    shotStore.updateShotFields(jobId, { status: 'running' });
+
     const shot = await analyzeAndStoreUploadedShot(
       { filename, path: target, size: stats.size },
       {
         ...(req.body || {}),
         force: req.body?.force === true,
-        sourceType: req.body?.sourceType || existing?.sourceType || 'file',
+        sessionId,
+        sourceType,
       },
     );
     return res.json({ ok: true, jobId: shot.jobId, filename, url: uploadsUrl(filename), status: shot.status });

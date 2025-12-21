@@ -15,7 +15,7 @@ UPLOAD_DIR=/home/ray/uploads DATA_DIR=/home/ray/data node server.js
 
 ## 핵심 API 요약
 - 업로드(+옵션 분석): `POST /api/upload` (form-data `video`, `?analyze=true`, `force=true`로 프리체크 무시)
-- 기존 파일 분석: `POST /api/analyze/from-file` (`{ filename, force? }`)
+- 기존 파일 분석: `POST /api/analyze/from-file` (`{ filename, force? }`, `.mp4/.mov` 지원, 내부 상태 `queued → running → succeeded/failed`)
 - 분석 업로드(동일): `POST /api/analyze/upload`, `POST /api/analyze`
 - 파일 목록(표준): `GET /api/files/detail` → `.mp4/.mov` + 상태/분석/에러 포함
 - 샷/세션: `GET /api/shots`, `GET /api/shots/:id/analysis`, `GET /api/sessions`
@@ -30,7 +30,7 @@ UPLOAD_DIR=/home/ray/uploads DATA_DIR=/home/ray/data node server.js
 ## 분석 동작 특징
 - 프리체크 Abort: 스윙이 아니면 초기에 중단 → `status=failed`, `errorCode=NOT_SWING`, `errorMessage`로 안내. `force=true`로 무시 가능.
 - iPhone `.mov` 지원: 필요 시 ffmpeg로 `.mp4` 리먹스/트랜스코딩 후 분석. 변환/디코딩 실패 시 `errorCode=DECODE_FAILED`.
-- 분석 스키마(현 버전): `ballFlight/impact`(launch angles 등), `swing`(모션 휴리스틱), `coach_summary` 텍스트. 일부 값은 검출 실패 시 `null/unknown`.
+- 분석 스키마(현 버전): `ballFlight/impact`(launch angles 등), `swing`(모션 휴리스틱), `coach_summary` 텍스트, `analysisVersion`(`opencv-v1`), `meta`(fps/width/height/durationMs). 일부 값은 검출 실패 시 `null/unknown`.
 
 ## OpenCV 워커
 - `analysis/opencv_worker.py`: 공 검출/임팩트 추정/궤적 계산 → 발사각/수평각/곡률/샷 타입 추정. 실패 시 `swing/ballFlight:null` + `errorMessage`.
