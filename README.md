@@ -1,6 +1,20 @@
 # hailo-back
 라즈베리파이에서 동작하는 **골프 스윙 업로드·분석 백엔드**입니다. 업로드/정적 서빙 + 간단한 OpenCV 기반 분석을 제공하며, 추후 Job/ML 파이프라인으로 확장 예정입니다.
 
+## 필수 구성요소
+- Node.js 18+
+- Python 3.9+ (`python3` 명령어 제공)
+- Python 패키지: `opencv-python`, `numpy`
+  ```bash
+  python3 -m pip install --upgrade pip
+  python3 -m pip install opencv-python numpy
+  ```
+- `ffmpeg`, `ffprobe` (iPhone `.mov` 변환/메타데이터 추출에 사용). Raspberry Pi OS 기준:
+  ```bash
+  sudo apt update
+  sudo apt install ffmpeg
+  ```
+
 ## 빠른 실행
 ```bash
 npm install
@@ -12,12 +26,16 @@ UPLOAD_DIR=/home/ray/uploads DATA_DIR=/home/ray/data node server.js
 - 업로드 경로: `UPLOAD_DIR`(기본 `./uploads`, 운영 `/home/ray/uploads`)
 - 샷/세션 저장: `DATA_DIR`(기본 `./data`, 운영 `/home/ray/data`)
 - 헬스체크: `GET /health/ok.txt`
+- 정적 자산: `client-dist/`를 자동 서빙하며 SPA fallback(`/index.html`)도 포함됨. 별도 프런트 빌드가 있다면 해당 폴더에 산출물 배치.
 
 ## 핵심 API 요약
 - 업로드(+옵션 분석): `POST /api/upload` (form-data `video`, `?analyze=true`, `force=true`로 프리체크 무시)
 - 기존 파일 분석: `POST /api/analyze/from-file` (`{ filename, force? }`, `.mp4/.mov` 지원, 내부 상태 `queued → running → succeeded/failed`)
 - 분석 업로드(동일): `POST /api/analyze/upload`, `POST /api/analyze`
+- Job 상태 조회: `GET /api/analyze/:jobId`, `GET /api/analyze/:jobId/result` → `status`, `analysis` 페이로드 반환
 - 파일 목록(표준): `GET /api/files/detail` → `.mp4/.mov` + 상태/분석/에러 포함
+- 파일 목록(Shot 기준): `GET /api/files`
+- 파일 삭제: `DELETE /api/files/:filename`
 - 샷/세션: `GET /api/shots`, `GET /api/shots/:id/analysis`, `GET /api/sessions`
 - 정적 파일: `/uploads/:name`
 
