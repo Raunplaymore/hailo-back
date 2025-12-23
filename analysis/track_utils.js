@@ -1,10 +1,6 @@
 const BALL_LABELS = ['golf_ball', 'golfball', 'golf ball', 'ball'];
 const CLUB_LABELS = ['clubhead', 'club_head', 'club-head', 'club head', 'club'];
 
-const BALL_CLASS_ID = Number.parseInt(process.env.BALL_CLASS_ID, 10);
-const CLUB_CLASS_ID = Number.parseInt(process.env.CLUB_CLASS_ID, 10);
-const HAS_BALL_CLASS_ID = Number.isFinite(BALL_CLASS_ID);
-const HAS_CLUB_CLASS_ID = Number.isFinite(CLUB_CLASS_ID);
 
 function normalizeLabel(label) {
   if (!label) return '';
@@ -16,26 +12,14 @@ function matchesLabel(label, candidates) {
   return candidates.some((candidate) => label === candidate || label.includes(candidate));
 }
 
-function matchesClassId(det, targetId) {
-  if (!Number.isFinite(targetId)) return false;
-  if (!det || det.classId === null || det.classId === undefined) return false;
-  return Number(det.classId) === targetId;
-}
-
 function isBallDetection(det) {
   const label = normalizeLabel(det?.label);
-  return (
-    matchesLabel(label, BALL_LABELS) ||
-    (HAS_BALL_CLASS_ID && matchesClassId(det, BALL_CLASS_ID))
-  );
+  return matchesLabel(label, BALL_LABELS);
 }
 
 function isClubheadDetection(det) {
   const label = normalizeLabel(det?.label);
-  return (
-    matchesLabel(label, CLUB_LABELS) ||
-    (HAS_CLUB_CLASS_ID && matchesClassId(det, CLUB_CLASS_ID))
-  );
+  return matchesLabel(label, CLUB_LABELS);
 }
 
 function bboxCenter(bbox) {

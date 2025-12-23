@@ -839,16 +839,14 @@ app.post('/api/analyze/from-file', (req, res) => {
   const providedJobId = typeof payload.jobId === 'string' ? payload.jobId : null;
   const filename = typeof payload.filename === 'string' ? payload.filename : null;
   const force = payload.force === true || toBoolean(payload.force);
-  const derivedJobId =
-    providedJobId || (filename ? path.basename(filename, path.extname(filename)) : null);
-  if (!derivedJobId) {
+  if (!providedJobId) {
     return res.status(400).json({ ok: false, message: 'jobId is required' });
   }
-  if (derivedJobId.includes('/') || derivedJobId.includes('\\')) {
+  if (providedJobId.includes('/') || providedJobId.includes('\\')) {
     return res.status(400).json({ ok: false, message: 'Invalid jobId' });
   }
 
-  const targetFilename = filename || `${derivedJobId}.mp4`;
+  const targetFilename = filename || `${providedJobId}.mp4`;
   if (!isSupportedVideoExt(targetFilename)) {
     return res.status(400).json({ ok: false, message: 'Only .mp4/.mov is supported' });
   }
@@ -856,17 +854,17 @@ app.post('/api/analyze/from-file', (req, res) => {
     return res.status(400).json({ ok: false, message: 'Invalid file path' });
   }
 
-  const existing = jobStore.getJob(derivedJobId);
-  if (existing && !force && ['pending', 'running', 'done'].includes(existing.status)) {
-    return res.json({ ok: true, jobId: derivedJobId, status: existing.status });
+  const existing = jobStore.getJob(providedJobId);
+  if (existing && !force && ['pending', 'running', 'done', 'failed'].includes(existing.status)) {
+    return res.json({ ok: true, jobId: providedJobId, status: existing.status });
   }
   if (existing && existing.status === 'running' && force) {
-    return res.json({ ok: true, jobId: derivedJobId, status: existing.status });
+    return res.json({ ok: true, jobId: providedJobId, status: existing.status });
   }
 
   const now = new Date().toISOString();
   const job = {
-    jobId: derivedJobId,
+    jobId: providedJobId,
     filename: targetFilename,
     status: 'pending',
     createdAt: existing?.createdAt || now,
@@ -877,19 +875,9 @@ app.post('/api/analyze/from-file', (req, res) => {
     result: null,
   };
   jobStore.upsertJob(job);
-  setImmediate(() => runMetaAnalysisJob(derivedJobId));
-  jobStore.updateJob(derivedJobId, { status: 'running', startedAt: now });
-  return res.json({ ok: true, jobId: derivedJobId, status: 'running' });
+  setImmediate(() => runMetaAnalysisJob(providedJobId));
+  return res.json({ ok: true, jobId: providedJobId, status: 'running' });
 });
-
-function mapLegacyStatus(status) {
-  const normalized = normalizeJobStatus(status);
-  if (normalized === 'queued' || normalized === 'not-analyzed') return 'pending';
-  if (normalized === 'running') return 'running';
-  if (normalized === 'succeeded') return 'done';
-  if (normalized === 'failed') return 'failed';
-  return 'pending';
-}
 
 function respondJobStatus(req, res) {
   const jobId = req.params.jobId;
@@ -918,25 +906,11 @@ function respondJobStatus(req, res) {
   if (!shot) {
     return res.status(404).json({ ok: false, message: 'Job not found' });
   }
-  const status = mapLegacyStatus(shot.status);
-  let summary = '';
-  const coach = shot.analysis?.coach_summary;
-  if (Array.isArray(coach)) {
-    summary = coach.join(' ');
-  } else if (typeof coach === 'string') {
-    summary = coach;
-  } else if (shot.analysis?.errorMessage) {
-    summary = shot.analysis.errorMessage;
-  }
-  const result = buildAnalysisResult({ summary });
   return res.json({
     ok: true,
     jobId,
-    status,
-    errorMessage: shot.analysis?.errorMessage ?? null,
-    events: result.events,
-    metrics: result.metrics,
-    summary: result.summary,
+    status: shot.status || 'succeeded',
+    analysis: buildJobAnalysisPayload(shot),
   });
 }
 
