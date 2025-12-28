@@ -29,13 +29,14 @@ UPLOAD_DIR=/home/ray/uploads DATA_DIR=/home/ray/data node server.js
 - 포트: `3000`
 - 업로드 경로: `UPLOAD_DIR`(기본 `./uploads`, 운영 `/home/ray/uploads`)
 - 샷/세션 저장: `DATA_DIR`(기본 `./data`, 운영 `/home/ray/data`)
+- 분석 서비스: `INFER_BASE_URL`(기본 `http://127.0.0.1:8002`)
 - 헬스체크: `GET /health/ok.txt`
 - 정적 자산: `client-dist/`를 자동 서빙하며 SPA fallback(`/index.html`)도 포함됨. 별도 프런트 빌드가 있다면 해당 폴더에 산출물 배치.
 
 ## 핵심 API 요약
 
 - 업로드(+옵션 분석): `POST /api/upload` (form-data `video`, `?analyze=true`, `force=true`로 프리체크 무시)
-- Hailo 메타 기반 분석: `POST /api/analyze/from-file` (`{ jobId, filename, force? }`, `filename` 기본 `<jobId>.mp4`, 상태 `pending|running|done|failed`)
+- Hailo 메타 기반 분석: `POST /api/analyze/from-file` (`{ jobId, filename?, metaPath?, force? }`, `filename` 기본 `<jobId>.mp4`, 상태 `pending|running|done|failed`)
 - 분석 업로드(동일): `POST /api/analyze/upload`, `POST /api/analyze`
 - Job 상태 조회: `GET /api/analyze/:jobId`, `GET /api/analyze/:jobId/result`
 - 파일 목록(표준): `GET /api/files/detail` → `.mp4/.mov` + 상태/분석/에러 포함
@@ -53,11 +54,9 @@ UPLOAD_DIR=/home/ray/uploads DATA_DIR=/home/ray/data node server.js
 
 ## Hailo 카메라 분석 파이프라인 (메타 기반)
 
-- 전제: hailo-camera가 `/uploads/<jobId>.mp4`와 `META_DIR/<jobId>.meta.json`을 생성. 백엔드의 `UPLOAD_DIR`는 이 경로를 바라봐야 함.
-- 트리거: 세션 종료 후 프런트가 `POST /api/analyze/from-file` 호출 → 백그라운드 분석.
+- 전제: hailo-camera가 `/uploads/<jobId>.mp4`를 생성하고, 세션 종료 시 `{ jobId, filename, metaPath }`로 `POST /api/analyze/from-file` 호출.
+- 백엔드는 `INFER_BASE_URL`의 `/v1/jobs`로 분석을 위임하며, `metaPath`는 그대로 전달됨(없으면 `null`).
 - 상태 조회: `GET /api/analyze/:jobId`를 폴링.
-- `META_DIR` 기본값: `/tmp`.
-- `META_DIR`에 메타가 없으면 `CAMERA_BASE_URL`이 설정된 경우 `GET /api/session/:jobId/meta`를 비동기로 조회 시도.
 - 결과는 코칭 지표 중심(`swingPlane`, `tempo`, `impactStability`), 런치 모니터 물리값(스핀/캐리/발사각) 계산 없음.
 
 ### 요청/응답 예시
@@ -69,6 +68,7 @@ Content-Type: application/json
 {
   "jobId": "session-123",
   "filename": "session-123.mp4",
+  "metaPath": "/tmp/session-123.meta.json",
   "force": false
 }
 ```

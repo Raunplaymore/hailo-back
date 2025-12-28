@@ -12,10 +12,6 @@ const {
 } = require('./analysis/engine');
 const opencvAnalyzer = require('./analyzers/opencvV1');
 const shotStore = require('./store/shotStore');
-const { parseMeta } = require('./analysis/meta_parser');
-const { detectEvents } = require('./analysis/event_detector');
-const { calculateMetrics } = require('./analysis/metrics_calculator');
-const jobStore = require('./store/job_store');
 
 const app = express();
 const PORT = 3000;
@@ -23,13 +19,17 @@ const PORT = 3000;
 const uploadDir =
   process.env.UPLOAD_DIR ||
   (fs.existsSync('/home/ray/uploads') ? '/home/ray/uploads' : path.join(__dirname, 'uploads'));
+const dataDir =
+  process.env.DATA_DIR ||
+  (fs.existsSync('/home/ray/data') ? '/home/ray/data' : path.join(__dirname, 'data'));
 const healthDir = path.join(__dirname, 'health');
-const metaDir = process.env.META_DIR || '/tmp';
-const cameraBaseUrl = process.env.CAMERA_BASE_URL;
-const activeAnalysisJobs = new Set();
+const inferBaseUrl = process.env.INFER_BASE_URL || 'http://127.0.0.1:8002';
+const analysisCacheDir = path.join(dataDir, 'analysis');
 
 // Ensure upload directory exists
 fs.mkdirSync(uploadDir, { recursive: true });
+fs.mkdirSync(dataDir, { recursive: true });
+fs.mkdirSync(analysisCacheDir, { recursive: true });
 fs.mkdirSync(healthDir, { recursive: true });
 
 // Configure multer storage: timestamp prefix keeps uploads unique
@@ -455,33 +455,9 @@ function formatAnalysisForFrontend(raw) {
   };
 }
 
-const EMPTY_EVENTS = {
-  addressMs: null,
-  topMs: null,
-  impactMs: null,
-  finishMs: null,
-};
-
-const EMPTY_METRICS = {
-  swingPlane: { label: 'neutral', confidence: 0 },
-  tempo: { backswingMs: null, downswingMs: null, ratio: null },
-  impactStability: { label: 'unstable', score: 0 },
-};
-
-function buildAnalysisResult({ events, metrics, summary } = {}) {
-  return {
-    events: { ...EMPTY_EVENTS, ...(events || {}) },
-    metrics: {
-      swingPlane: { ...EMPTY_METRICS.swingPlane, ...(metrics?.swingPlane || {}) },
-      tempo: { ...EMPTY_METRICS.tempo, ...(metrics?.tempo || {}) },
-      impactStability: {
-        ...EMPTY_METRICS.impactStability,
-        ...(metrics?.impactStability || {}),
-      },
-    },
-    summary: summary || '',
-  };
-}
+const DEFAULT_PENDING_ITEMS = [
+  { key: 'club_tracking', label: '클럽 추적', description: '향후 스윙 이벤트/클럽 경로', status: 'coming-soon' },
+];
 
 function resolveUploadPath(filename) {
   if (!filename || typeof filename !== 'string') return null;
@@ -493,112 +469,185 @@ function resolveUploadPath(filename) {
   return target;
 }
 
-async function fetchMetaFromCamera(jobId) {
-  if (!cameraBaseUrl || typeof fetch !== 'function') return null;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 1500);
+function analysisCachePath(jobId) {
+  if (!jobId) return null;
+  return path.join(analysisCacheDir, `${jobId}.json`);
+}
+
+function readAnalysisCache(jobId) {
+  const cachePath = analysisCachePath(jobId);
+  if (!cachePath) return null;
   try {
-    const base = cameraBaseUrl.replace(/\/$/, '');
-    const res = await fetch(`${base}/api/session/${jobId}/meta`, {
-      signal: controller.signal,
-    });
-    if (!res.ok) return null;
-    return await res.json();
+    const raw = fs.readFileSync(cachePath, 'utf8');
+    return JSON.parse(raw);
   } catch {
     return null;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
-async function loadMetaPayload(jobId) {
-  const metaPath = path.join(metaDir, `${jobId}.meta.json`);
-  if (fs.existsSync(metaPath)) {
-    try {
-      const raw = await fs.promises.readFile(metaPath, 'utf8');
-      return JSON.parse(raw);
-    } catch {
-      return null;
-    }
-  }
-  return fetchMetaFromCamera(jobId);
+function writeAnalysisCache(jobId, cache) {
+  const cachePath = analysisCachePath(jobId);
+  if (!cachePath || !cache) return null;
+  const payload = {
+    jobId,
+    ...cache,
+    updatedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(cachePath, JSON.stringify(payload, null, 2), 'utf8');
+  return payload;
 }
 
-async function runMetaAnalysisJob(jobId) {
-  const job = jobStore.getJob(jobId);
-  if (!job) return;
-  if (activeAnalysisJobs.has(jobId)) return;
-  activeAnalysisJobs.add(jobId);
+function mapInferStatus(status) {
+  const v = String(status || '').toLowerCase();
+  if (v === 'queued' || v === 'pending') return 'pending';
+  if (v === 'running' || v === 'processing') return 'running';
+  if (v === 'succeeded' || v === 'success' || v === 'done' || v === 'completed') return 'done';
+  if (v === 'failed' || v === 'error') return 'failed';
+  return 'pending';
+}
+
+function mapCacheStatusToFileStatus(status) {
+  if (status === 'pending' || status === 'queued') return 'queued';
+  if (status === 'running') return 'running';
+  if (status === 'done') return 'succeeded';
+  if (status === 'failed') return 'failed';
+  return 'not-analyzed';
+}
+
+function buildJobAnalysisPayloadFromAnalysis(jobId, status, analysis) {
+  const mappedStatus = status === 'done' ? 'succeeded' : status === 'failed' ? 'failed' : 'running';
+  return buildJobAnalysisPayload({ jobId, status: mappedStatus, analysis });
+}
+
+function buildCoachAnalysisPayload(jobId, status, result) {
+  const tempo = result?.metrics?.tempo || {};
+  const impactMs =
+    result?.events?.impactMs ??
+    result?.events?.impact?.timeMs ??
+    result?.events?.impact?.time_ms ??
+    null;
+  const ratioValue =
+    tempo.ratio === null || tempo.ratio === undefined
+      ? null
+      : typeof tempo.ratio === 'string'
+        ? tempo.ratio
+        : `${tempo.ratio}:1`;
+  const mappedStatus = status === 'done' ? 'succeeded' : status === 'failed' ? 'failed' : 'running';
+  return {
+    jobId,
+    status: mappedStatus,
+    analysisVersion: result?.analysisVersion || 'coach-meta-v1',
+    errorCode: result?.errorCode ?? null,
+    events: {
+      address: null,
+      top: null,
+      impact: impactMs !== null ? { timeMs: impactMs } : null,
+      finish: null,
+    },
+    metrics: {
+      tempo: {
+        backswingMs: tempo.backswingMs ?? tempo.backswing_time_ms ?? null,
+        downswingMs: tempo.downswingMs ?? tempo.downswing_time_ms ?? null,
+        ratio: ratioValue,
+      },
+      eventTiming: {
+        address: null,
+        top: null,
+        impact: impactMs ?? null,
+        finish: null,
+      },
+      ball: {
+        launchDirection: 'unknown',
+        launchAngle: null,
+        speedRelative: 'unknown',
+      },
+    },
+    pending: DEFAULT_PENDING_ITEMS,
+    errorMessage: result?.errorMessage ?? null,
+    meta: result?.meta ?? null,
+  };
+}
+
+function isJobAnalysisPayload(result) {
+  return Boolean(result?.metrics?.ball) && Boolean(result?.events);
+}
+
+function normalizeInferResult(jobId, status, result) {
+  if (!result || typeof result !== 'object') {
+    return buildCoachAnalysisPayload(jobId, status, {});
+  }
+  if (result.analysis && typeof result.analysis === 'object') {
+    return normalizeInferResult(jobId, status, result.analysis);
+  }
+  if (isJobAnalysisPayload(result)) {
+    return {
+      ...result,
+      jobId: result.jobId || jobId,
+      status: result.status || (status === 'done' ? 'succeeded' : status === 'failed' ? 'failed' : 'running'),
+    };
+  }
+  if (result.swing || result.ballFlight || result.impact) {
+    return buildJobAnalysisPayloadFromAnalysis(jobId, status, result);
+  }
+  if (result.metrics && result.events) {
+    return buildCoachAnalysisPayload(jobId, status, result);
+  }
+  return buildCoachAnalysisPayload(jobId, status, result);
+}
+
+function buildInferErrorAnalysis(jobId, errorMessage) {
+  return {
+    jobId,
+    status: 'failed',
+    analysisVersion: 'coach-meta-v1',
+    errorCode: 'INFER_UNAVAILABLE',
+    events: {
+      address: null,
+      top: null,
+      impact: null,
+      finish: null,
+    },
+    metrics: {
+      tempo: { backswingMs: null, downswingMs: null, ratio: null },
+      eventTiming: { address: null, top: null, impact: null, finish: null },
+      ball: { launchDirection: 'unknown', launchAngle: null, speedRelative: 'unknown' },
+    },
+    pending: DEFAULT_PENDING_ITEMS,
+    errorMessage,
+    meta: null,
+  };
+}
+
+function inferUrl(pathname) {
+  if (!inferBaseUrl) return null;
+  const base = inferBaseUrl.replace(/\/$/, '');
+  return `${base}${pathname}`;
+}
+
+async function inferFetchJson(url, { method = 'GET', body, timeoutMs = 2000 } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    jobStore.updateJob(jobId, {
-      status: 'running',
-      startedAt: new Date().toISOString(),
-      errorMessage: null,
+    const res = await fetch(url, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
     });
-
-    const videoPath = resolveUploadPath(job.filename);
-    if (!videoPath || !fs.existsSync(videoPath)) {
-      const result = buildAnalysisResult({
-        summary: 'Video file not found.',
-      });
-      jobStore.updateJob(jobId, {
-        status: 'failed',
-        finishedAt: new Date().toISOString(),
-        errorMessage: 'Video file not found',
-        result,
-      });
-      return;
+    const text = await res.text();
+    let json = null;
+    if (text) {
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = null;
+      }
     }
-
-    const metaPayload = await loadMetaPayload(jobId);
-    if (!metaPayload) {
-      const result = buildAnalysisResult({
-        summary: 'Meta file not available.',
-      });
-      jobStore.updateJob(jobId, {
-        status: 'failed',
-        finishedAt: new Date().toISOString(),
-        errorMessage: 'Meta file not found',
-        result,
-      });
-      return;
-    }
-
-    const { frames } = parseMeta(metaPayload);
-    if (!frames.length) {
-      const result = buildAnalysisResult({
-        summary: 'No frame data available.',
-      });
-      jobStore.updateJob(jobId, {
-        status: 'failed',
-        finishedAt: new Date().toISOString(),
-        errorMessage: 'No frame data in meta',
-        result,
-      });
-      return;
-    }
-
-    const { events, signals } = detectEvents(frames);
-    const { metrics, summary } = calculateMetrics(frames, events, signals);
-    const result = buildAnalysisResult({ events, metrics, summary });
-    jobStore.updateJob(jobId, {
-      status: 'done',
-      finishedAt: new Date().toISOString(),
-      errorMessage: null,
-      result,
-    });
-  } catch (err) {
-    const result = buildAnalysisResult({
-      summary: 'Analysis failed.',
-    });
-    jobStore.updateJob(jobId, {
-      status: 'failed',
-      finishedAt: new Date().toISOString(),
-      errorMessage: err.message,
-      result,
-    });
+    return { ok: res.ok, status: res.status, json };
+  } catch (error) {
+    return { ok: false, status: 0, error };
   } finally {
-    activeAnalysisJobs.delete(jobId);
+    clearTimeout(timer);
   }
 }
 
@@ -834,10 +883,11 @@ app.post('/api/analyze', upload.single('video'), async (req, res) => {
 });
 
 // Trigger analysis for an existing file in UPLOAD_DIR (no re-upload)
-app.post('/api/analyze/from-file', (req, res) => {
+app.post('/api/analyze/from-file', async (req, res) => {
   const payload = req.body || {};
   const providedJobId = typeof payload.jobId === 'string' ? payload.jobId : null;
   const filename = typeof payload.filename === 'string' ? payload.filename : null;
+  const metaPath = typeof payload.metaPath === 'string' ? payload.metaPath : null;
   const force = payload.force === true || toBoolean(payload.force);
   if (!providedJobId) {
     return res.status(400).json({ ok: false, message: 'jobId is required' });
@@ -854,51 +904,196 @@ app.post('/api/analyze/from-file', (req, res) => {
     return res.status(400).json({ ok: false, message: 'Invalid file path' });
   }
 
-  const existing = jobStore.getJob(providedJobId);
-  if (existing && !force && ['pending', 'running', 'done', 'failed'].includes(existing.status)) {
-    return res.json({ ok: true, jobId: providedJobId, status: existing.status });
-  }
-  if (existing && existing.status === 'running' && force) {
-    return res.json({ ok: true, jobId: providedJobId, status: existing.status });
+  const baseUrl = inferUrl('/v1/jobs');
+  if (!baseUrl) {
+    const errorMessage = 'infer service not configured';
+    const analysis = buildInferErrorAnalysis(providedJobId, errorMessage);
+    writeAnalysisCache(providedJobId, {
+      status: 'failed',
+      analysis,
+      errorCode: analysis.errorCode,
+      errorMessage,
+    });
+    return res.json({
+      ok: true,
+      jobId: providedJobId,
+      status: 'failed',
+      errorCode: analysis.errorCode,
+      errorMessage,
+    });
   }
 
-  const now = new Date().toISOString();
-  const job = {
+  const videoPath = path.join(uploadDir, targetFilename);
+  const requestBody = {
+    mode: 'coach_from_meta',
     jobId: providedJobId,
-    filename: targetFilename,
-    status: 'pending',
-    createdAt: existing?.createdAt || now,
-    requestedAt: now,
-    startedAt: null,
-    finishedAt: null,
-    errorMessage: null,
-    result: null,
+    source: {
+      filename: targetFilename,
+      videoPath,
+      metaPath: metaPath || null,
+    },
+    options: { force: Boolean(force) },
   };
-  jobStore.upsertJob(job);
-  setImmediate(() => runMetaAnalysisJob(providedJobId));
-  return res.json({ ok: true, jobId: providedJobId, status: 'running' });
+
+  const response = await inferFetchJson(baseUrl, { method: 'POST', body: requestBody, timeoutMs: 2500 });
+  if (!response.ok && response.status !== 409) {
+    const errorMessage =
+      response.json?.message || response.json?.error || 'infer service unavailable';
+    const analysis = buildInferErrorAnalysis(providedJobId, errorMessage);
+    writeAnalysisCache(providedJobId, {
+      status: 'failed',
+      analysis,
+      errorCode: analysis.errorCode,
+      errorMessage,
+    });
+    return res.json({
+      ok: true,
+      jobId: providedJobId,
+      status: 'failed',
+      errorCode: analysis.errorCode,
+      errorMessage,
+    });
+  }
+
+  if (response.status === 409) {
+    const statusUrl = inferUrl(`/v1/jobs/${encodeURIComponent(providedJobId)}`);
+    if (statusUrl) {
+      const statusRes = await inferFetchJson(statusUrl, { timeoutMs: 1500 });
+      if (statusRes.ok) {
+        const mappedStatus = mapInferStatus(statusRes.json?.status || statusRes.json?.state);
+        writeAnalysisCache(providedJobId, {
+          status: mappedStatus,
+          analysis: readAnalysisCache(providedJobId)?.analysis || null,
+          errorCode: null,
+          errorMessage: null,
+        });
+        return res.json({ ok: true, jobId: providedJobId, status: mappedStatus });
+      }
+    }
+  }
+
+  writeAnalysisCache(providedJobId, {
+    status: 'pending',
+    analysis: null,
+    errorCode: null,
+    errorMessage: null,
+  });
+  return res.json({ ok: true, jobId: providedJobId, status: 'queued' });
 });
 
-function respondJobStatus(req, res) {
+async function fetchInferJobPayload(jobId, { includeResult } = {}) {
+  const cached = readAnalysisCache(jobId);
+  const cachedStatus = cached?.status;
+  const cachedAnalysis = cached?.analysis || null;
+
+  const statusUrl = inferUrl(`/v1/jobs/${encodeURIComponent(jobId)}`);
+  if (!statusUrl) {
+    if (cached) {
+      return { status: cachedStatus || 'failed', analysis: cachedAnalysis };
+    }
+    const analysis = buildInferErrorAnalysis(jobId, 'infer service not configured');
+    writeAnalysisCache(jobId, {
+      status: 'failed',
+      analysis,
+      errorCode: analysis.errorCode,
+      errorMessage: analysis.errorMessage,
+    });
+    return { status: 'failed', analysis };
+  }
+
+  const statusRes = await inferFetchJson(statusUrl, { timeoutMs: 1500 });
+  if (!statusRes.ok) {
+    if (statusRes.status === 404) {
+      if (cached) {
+        return { status: cachedStatus || 'done', analysis: cachedAnalysis };
+      }
+      return { notFound: true };
+    }
+    if (cached) {
+      return { status: cachedStatus || 'failed', analysis: cachedAnalysis };
+    }
+    const analysis = buildInferErrorAnalysis(jobId, 'infer service unavailable');
+    writeAnalysisCache(jobId, {
+      status: 'failed',
+      analysis,
+      errorCode: analysis.errorCode,
+      errorMessage: analysis.errorMessage,
+    });
+    return { status: 'failed', analysis };
+  }
+
+  const mappedStatus = mapInferStatus(statusRes.json?.status || statusRes.json?.state);
+  let analysis = cachedAnalysis;
+
+  if (mappedStatus === 'done') {
+    const resultUrl = inferUrl(`/v1/jobs/${encodeURIComponent(jobId)}/result`);
+    if (resultUrl) {
+      const resultRes = await inferFetchJson(resultUrl, { timeoutMs: 3000 });
+      if (resultRes.ok) {
+        analysis = normalizeInferResult(jobId, mappedStatus, resultRes.json);
+      } else if (!analysis) {
+        const errorAnalysis = buildInferErrorAnalysis(jobId, 'infer result unavailable');
+        writeAnalysisCache(jobId, {
+          status: 'failed',
+          analysis: errorAnalysis,
+          errorCode: errorAnalysis.errorCode,
+          errorMessage: errorAnalysis.errorMessage,
+        });
+        return { status: 'failed', analysis: errorAnalysis };
+      }
+    }
+  } else if (includeResult) {
+    writeAnalysisCache(jobId, {
+      status: mappedStatus,
+      analysis,
+      errorCode: analysis?.errorCode ?? null,
+      errorMessage: analysis?.errorMessage ?? null,
+    });
+    return { status: mappedStatus, analysis };
+  }
+
+  writeAnalysisCache(jobId, {
+    status: mappedStatus,
+    analysis,
+    errorCode: analysis?.errorCode ?? null,
+    errorMessage: analysis?.errorMessage ?? null,
+  });
+  return { status: mappedStatus, analysis };
+}
+
+async function respondJobStatus(req, res) {
   const jobId = req.params.jobId;
-  const job = jobStore.getJob(jobId);
-  if (job) {
-    const result = buildAnalysisResult(job.result || {});
-    const summary = result.summary || (job.status === 'running'
-      ? 'Analysis running.'
-      : job.status === 'pending'
-        ? 'Analysis pending.'
-        : job.status === 'failed'
-          ? 'Analysis failed.'
-          : '');
+  const inferPayload = await fetchInferJobPayload(jobId, { includeResult: false });
+  if (!inferPayload?.notFound) {
     return res.json({
       ok: true,
       jobId,
-      status: job.status,
-      errorMessage: job.errorMessage ?? null,
-      events: result.events,
-      metrics: result.metrics,
-      summary,
+      status: inferPayload.status,
+      analysis: inferPayload.analysis || null,
+    });
+  }
+
+  const shot = shotStore.getShotByJobId(jobId);
+  if (!shot) {
+    return res.status(404).json({ ok: false, message: 'Job not found' });
+  }
+  return res.json({
+    ok: true,
+    jobId,
+    status: shot.status || 'succeeded',
+    analysis: buildJobAnalysisPayload(shot),
+  });
+}
+
+async function respondJobResult(req, res) {
+  const jobId = req.params.jobId;
+  const inferPayload = await fetchInferJobPayload(jobId, { includeResult: true });
+  if (!inferPayload?.notFound) {
+    return res.json({
+      ok: true,
+      jobId,
+      status: inferPayload.status,
+      analysis: inferPayload.analysis || null,
     });
   }
 
@@ -915,7 +1110,7 @@ function respondJobStatus(req, res) {
 }
 
 app.get('/api/analyze/:jobId', respondJobStatus);
-app.get('/api/analyze/:jobId/result', respondJobStatus);
+app.get('/api/analyze/:jobId/result', respondJobResult);
 
 const listShotsHandler = (_req, res) => {
   const shots = shotStore.listShots();
@@ -1026,28 +1221,46 @@ app.get('/api/files/detail', async (_req, res) => {
     const filesWithStatus = await Promise.all(
       videoFiles.map(async (filename) => {
         const shot = shotStore.getShotByMediaName(filename);
+        const derivedJobId = path.basename(filename, path.extname(filename));
+        const cached = readAnalysisCache(derivedJobId);
+        const cachedAnalysis = cached?.analysis || null;
+        const cachedStatus = cached?.status || null;
+        const cachedFileStatus = cachedStatus ? mapCacheStatusToFileStatus(cachedStatus) : null;
+        const cachedAnalyzed = cachedStatus === 'done';
         let stats;
         try {
           stats = await fs.promises.stat(path.join(uploadDir, filename));
 	        } catch {
 	          // ignore stat errors; keep lightweight listing
 	        }
-	        const errorCode = shot?.analysis?.errorCode ?? null;
-	        const errorMessage = shot?.analysis?.errorMessage ?? null;
+	        const errorCode =
+	          shot?.analysis?.errorCode ??
+	          cachedAnalysis?.errorCode ??
+	          cached?.errorCode ??
+	          null;
+	        const errorMessage =
+	          shot?.analysis?.errorMessage ??
+	          cachedAnalysis?.errorMessage ??
+	          cached?.errorMessage ??
+	          null;
 	        return {
 	          filename,
 	          url: uploadsUrl(filename),
 	          shotId: shot?.id || null,
-	          jobId: shot?.jobId || null,
-	          analyzed: normalizeJobStatus(shot?.status) === 'succeeded',
+	          jobId: shot?.jobId || cached?.jobId || derivedJobId,
+	          analyzed:
+	            normalizeJobStatus(shot?.status) === 'succeeded' ||
+	            (!shot && cachedAnalyzed),
 	          status:
 	            normalizeJobStatus(shot?.status) ||
-	            (shot?.analysis ? (looksLikeAnalysisFailure(shot.analysis) ? 'failed' : 'succeeded') : 'not-analyzed'),
+	            (shot?.analysis
+	              ? (looksLikeAnalysisFailure(shot.analysis) ? 'failed' : 'succeeded')
+	              : cachedFileStatus || 'not-analyzed'),
 	          errorCode,
 	          errorMessage,
 	          size: stats?.size,
 	          modifiedAt: stats?.mtime?.toISOString(),
-	          analysis: shot ? buildJobAnalysisPayload(shot) : null,
+	          analysis: shot ? buildJobAnalysisPayload(shot) : cachedAnalysis,
 	        };
 	      }),
 	    );
