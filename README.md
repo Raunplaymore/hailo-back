@@ -29,7 +29,7 @@ UPLOAD_DIR=/home/ray/uploads DATA_DIR=/home/ray/data node server.js
 - 포트: `3000`
 - 업로드 경로: `UPLOAD_DIR`(기본 `./uploads`, 운영 `/home/ray/uploads`)
 - 샷/세션 저장: `DATA_DIR`(기본 `./data`, 운영 `/home/ray/data`)
-- 분석 서비스: `INFER_BASE_URL`(기본 `http://127.0.0.1:8002`)
+- 분석 서비스: `INFER_BASE_URL`(기본 `http://127.0.0.1:8002`, hailo-infer 사용 시 `http://127.0.0.1:3002` 권장)
 - 헬스체크: `GET /health/ok.txt`
 - 정적 자산: `client-dist/`를 자동 서빙하며 SPA fallback(`/index.html`)도 포함됨. 별도 프런트 빌드가 있다면 해당 폴더에 산출물 배치.
 
