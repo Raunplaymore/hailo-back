@@ -22,8 +22,9 @@ const uploadDir =
 const dataDir =
   process.env.DATA_DIR ||
   (fs.existsSync('/home/ray/data') ? '/home/ray/data' : path.join(__dirname, 'data'));
+const metaDir = process.env.META_DIR || '/tmp';
 const healthDir = path.join(__dirname, 'health');
-const inferBaseUrl = process.env.INFER_BASE_URL || 'http://127.0.0.1:8002';
+const inferBaseUrl = process.env.INFER_BASE_URL || 'http://127.0.0.1:3002';
 const analysisCacheDir = path.join(dataDir, 'analysis');
 
 // Ensure upload directory exists
@@ -469,6 +470,31 @@ function resolveUploadPath(filename) {
   return target;
 }
 
+function resolveMetaPath(metaPath, jobId) {
+  const candidate = metaPath || (jobId ? path.join(metaDir, `${jobId}.meta.json`) : null);
+  if (!candidate || typeof candidate !== 'string') return null;
+  const resolvedMetaDir = path.resolve(metaDir);
+  const target = path.resolve(candidate);
+  if (!target.startsWith(`${resolvedMetaDir}${path.sep}`)) {
+    return null;
+  }
+  return target;
+}
+
+async function waitForFile(filePath, timeoutMs = 2000) {
+  if (!filePath) return false;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= timeoutMs) {
+    try {
+      await fs.promises.access(filePath, fs.constants.R_OK);
+      return true;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  return false;
+}
+
 function analysisCachePath(jobId) {
   if (!jobId) return null;
   return path.join(analysisCacheDir, `${jobId}.json`);
@@ -885,10 +911,25 @@ app.post('/api/analyze', upload.single('video'), async (req, res) => {
 // Trigger analysis for an existing file in UPLOAD_DIR (no re-upload)
 app.post('/api/analyze/from-file', async (req, res) => {
   const payload = req.body || {};
+  const source = payload.source && typeof payload.source === 'object' ? payload.source : {};
   const providedJobId = typeof payload.jobId === 'string' ? payload.jobId : null;
-  const filename = typeof payload.filename === 'string' ? payload.filename : null;
-  const metaPath = typeof payload.metaPath === 'string' ? payload.metaPath : null;
-  const force = payload.force === true || toBoolean(payload.force);
+  const filename =
+    typeof payload.filename === 'string'
+      ? payload.filename
+      : typeof source.filename === 'string'
+        ? source.filename
+        : null;
+  const metaPathInput =
+    typeof payload.metaPath === 'string'
+      ? payload.metaPath
+      : typeof source.metaPath === 'string'
+        ? source.metaPath
+        : null;
+  const force =
+    payload.force === true ||
+    toBoolean(payload.force) ||
+    payload.options?.force === true ||
+    toBoolean(payload.options?.force);
   if (!providedJobId) {
     return res.status(400).json({ ok: false, message: 'jobId is required' });
   }
@@ -903,6 +944,22 @@ app.post('/api/analyze/from-file', async (req, res) => {
   if (!resolveUploadPath(targetFilename)) {
     return res.status(400).json({ ok: false, message: 'Invalid file path' });
   }
+  const resolvedMetaPath = resolveMetaPath(metaPathInput, providedJobId);
+  if (!resolvedMetaPath) {
+    return res.status(400).json({ ok: false, message: 'Invalid meta path' });
+  }
+
+  const cached = readAnalysisCache(providedJobId);
+  const cachedAgeMs = cached?.updatedAt ? Date.now() - Date.parse(cached.updatedAt) : Number.POSITIVE_INFINITY;
+  const hasFreshInFlightCache =
+    Number.isFinite(cachedAgeMs) &&
+    cachedAgeMs < 30_000 &&
+    (cached.status === 'pending' || cached.status === 'running');
+  if (!force && cached?.status && (cached.status === 'done' || hasFreshInFlightCache)) {
+    return res.json({ ok: true, jobId: providedJobId, filename: targetFilename, status: cached.status });
+  }
+
+  await waitForFile(resolvedMetaPath, 2000);
 
   const baseUrl = inferUrl('/v1/jobs');
   if (!baseUrl) {
@@ -930,7 +987,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
     source: {
       filename: targetFilename,
       videoPath,
-      metaPath: metaPath || null,
+      metaPath: resolvedMetaPath,
     },
     options: { force: Boolean(force) },
   };
@@ -1025,7 +1082,7 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
   const mappedStatus = mapInferStatus(statusRes.json?.status || statusRes.json?.state);
   let analysis = cachedAnalysis;
 
-  if (mappedStatus === 'done') {
+  if (mappedStatus === 'done' || mappedStatus === 'failed') {
     const resultUrl = inferUrl(`/v1/jobs/${encodeURIComponent(jobId)}/result`);
     if (resultUrl) {
       const resultRes = await inferFetchJson(resultUrl, { timeoutMs: 3000 });

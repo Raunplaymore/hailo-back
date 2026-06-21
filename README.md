@@ -29,14 +29,14 @@ UPLOAD_DIR=/home/ray/uploads DATA_DIR=/home/ray/data node server.js
 - 포트: `3000`
 - 업로드 경로: `UPLOAD_DIR`(기본 `./uploads`, 운영 `/home/ray/uploads`)
 - 샷/세션 저장: `DATA_DIR`(기본 `./data`, 운영 `/home/ray/data`)
-- 분석 서비스: `INFER_BASE_URL`(기본 `http://127.0.0.1:8002`, hailo-infer 사용 시 `http://127.0.0.1:3002` 권장)
+- 분석 서비스: `INFER_BASE_URL`(기본 `http://127.0.0.1:3002`)
 - 헬스체크: `GET /health/ok.txt`
 - 정적 자산: `client-dist/`를 자동 서빙하며 SPA fallback(`/index.html`)도 포함됨. 별도 프런트 빌드가 있다면 해당 폴더에 산출물 배치.
 
 ## 핵심 API 요약
 
 - 업로드(+옵션 분석): `POST /api/upload` (form-data `video`, `?analyze=true`, `force=true`로 프리체크 무시)
-- Hailo 메타 기반 분석: `POST /api/analyze/from-file` (`{ jobId, filename?, metaPath?, force? }`, `filename` 기본 `<jobId>.mp4`, 상태 `pending|running|done|failed`)
+- Hailo 메타 기반 분석: `POST /api/analyze/from-file` (`{ jobId, filename?, metaPath?, force? }`, `filename` 기본 `<jobId>.mp4`, `metaPath` 기본 `META_DIR/<jobId>.meta.json`, 상태 `pending|running|done|failed`)
 - 분석 업로드(동일): `POST /api/analyze/upload`, `POST /api/analyze`
 - Job 상태 조회: `GET /api/analyze/:jobId`, `GET /api/analyze/:jobId/result`
 - 파일 목록(표준): `GET /api/files/detail` → `.mp4/.mov` + 상태/분석/에러 포함
