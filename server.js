@@ -959,7 +959,26 @@ app.post('/api/analyze/from-file', async (req, res) => {
     return res.json({ ok: true, jobId: providedJobId, filename: targetFilename, status: cached.status });
   }
 
-  await waitForFile(resolvedMetaPath, 2000);
+  const metaReady = await waitForFile(resolvedMetaPath, 2000);
+  if (!metaReady) {
+    const errorMessage = `meta file not found: ${resolvedMetaPath}`;
+    const analysis = buildInferErrorAnalysis(providedJobId, errorMessage);
+    writeAnalysisCache(providedJobId, {
+      status: 'failed',
+      analysis,
+      errorCode: analysis.errorCode,
+      errorMessage,
+      metaPath: resolvedMetaPath,
+    });
+    return res.json({
+      ok: true,
+      jobId: providedJobId,
+      filename: targetFilename,
+      status: 'failed',
+      errorCode: analysis.errorCode,
+      errorMessage,
+    });
+  }
 
   const baseUrl = inferUrl('/v1/jobs');
   if (!baseUrl) {
@@ -970,6 +989,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
       analysis,
       errorCode: analysis.errorCode,
       errorMessage,
+      metaPath: resolvedMetaPath,
     });
     return res.json({
       ok: true,
@@ -1002,6 +1022,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
       analysis,
       errorCode: analysis.errorCode,
       errorMessage,
+      metaPath: resolvedMetaPath,
     });
     return res.json({
       ok: true,
@@ -1023,6 +1044,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
           analysis: readAnalysisCache(providedJobId)?.analysis || null,
           errorCode: null,
           errorMessage: null,
+          metaPath: resolvedMetaPath,
         });
         return res.json({ ok: true, jobId: providedJobId, status: mappedStatus });
       }
@@ -1034,6 +1056,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
     analysis: null,
     errorCode: null,
     errorMessage: null,
+    metaPath: resolvedMetaPath,
   });
   return res.json({ ok: true, jobId: providedJobId, status: 'queued' });
 });
@@ -1127,6 +1150,8 @@ async function respondJobStatus(req, res) {
       jobId,
       status: inferPayload.status,
       analysis: inferPayload.analysis || null,
+      errorCode: inferPayload.analysis?.errorCode ?? null,
+      errorMessage: inferPayload.analysis?.errorMessage ?? null,
     });
   }
 
@@ -1151,6 +1176,8 @@ async function respondJobResult(req, res) {
       jobId,
       status: inferPayload.status,
       analysis: inferPayload.analysis || null,
+      errorCode: inferPayload.analysis?.errorCode ?? null,
+      errorMessage: inferPayload.analysis?.errorMessage ?? null,
     });
   }
 
@@ -1287,40 +1314,41 @@ app.get('/api/files/detail', async (_req, res) => {
         let stats;
         try {
           stats = await fs.promises.stat(path.join(uploadDir, filename));
-	        } catch {
-	          // ignore stat errors; keep lightweight listing
-	        }
-	        const errorCode =
-	          shot?.analysis?.errorCode ??
-	          cachedAnalysis?.errorCode ??
-	          cached?.errorCode ??
-	          null;
-	        const errorMessage =
-	          shot?.analysis?.errorMessage ??
-	          cachedAnalysis?.errorMessage ??
-	          cached?.errorMessage ??
-	          null;
-	        return {
-	          filename,
-	          url: uploadsUrl(filename),
-	          shotId: shot?.id || null,
-	          jobId: shot?.jobId || cached?.jobId || derivedJobId,
-	          analyzed:
-	            normalizeJobStatus(shot?.status) === 'succeeded' ||
-	            (!shot && cachedAnalyzed),
-	          status:
-	            normalizeJobStatus(shot?.status) ||
-	            (shot?.analysis
-	              ? (looksLikeAnalysisFailure(shot.analysis) ? 'failed' : 'succeeded')
-	              : cachedFileStatus || 'not-analyzed'),
-	          errorCode,
-	          errorMessage,
-	          size: stats?.size,
-	          modifiedAt: stats?.mtime?.toISOString(),
-	          analysis: shot ? buildJobAnalysisPayload(shot) : cachedAnalysis,
-	        };
-	      }),
-	    );
+        } catch {
+          // ignore stat errors; keep lightweight listing
+        }
+        const errorCode =
+          shot?.analysis?.errorCode ??
+          cachedAnalysis?.errorCode ??
+          cached?.errorCode ??
+          null;
+        const errorMessage =
+          shot?.analysis?.errorMessage ??
+          cachedAnalysis?.errorMessage ??
+          cached?.errorMessage ??
+          null;
+        return {
+          filename,
+          url: uploadsUrl(filename),
+          shotId: shot?.id || null,
+          jobId: shot?.jobId || cached?.jobId || derivedJobId,
+          analyzed:
+            normalizeJobStatus(shot?.status) === 'succeeded' ||
+            (!shot && cachedAnalyzed),
+          status:
+            normalizeJobStatus(shot?.status) ||
+            (shot?.analysis
+              ? (looksLikeAnalysisFailure(shot.analysis) ? 'failed' : 'succeeded')
+              : cachedFileStatus || 'not-analyzed'),
+          errorCode,
+          errorMessage,
+          metaPath: cached?.metaPath || null,
+          size: stats?.size,
+          modifiedAt: stats?.mtime?.toISOString(),
+          analysis: shot ? buildJobAnalysisPayload(shot) : cachedAnalysis,
+        };
+      }),
+    );
 
     res.json({ ok: true, files: filesWithStatus });
   } catch (err) {

@@ -55,7 +55,7 @@ UPLOAD_DIR=/home/ray/uploads DATA_DIR=/home/ray/data node server.js
 ## Hailo 카메라 분석 파이프라인 (메타 기반)
 
 - 전제: hailo-camera가 `/uploads/<jobId>.mp4`를 생성하고, 세션 종료 시 `{ jobId, filename, metaPath }`로 `POST /api/analyze/from-file` 호출.
-- 백엔드는 `INFER_BASE_URL`의 `/v1/jobs`로 분석을 위임하며, `metaPath`는 그대로 전달됨(없으면 `null`).
+- 백엔드는 `INFER_BASE_URL`의 `/v1/jobs`로 분석을 위임하며, `metaPath`는 그대로 전달됨(없으면 `META_DIR/<jobId>.meta.json`로 해석).
 - 상태 조회: `GET /api/analyze/:jobId`를 폴링.
 - 결과는 코칭 지표 중심(`swingPlane`, `tempo`, `impactStability`), 런치 모니터 물리값(스핀/캐리/발사각) 계산 없음.
 
