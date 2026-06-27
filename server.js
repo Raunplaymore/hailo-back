@@ -337,6 +337,25 @@ function buildJobAnalysisPayload(shot) {
   const analysis = shot.analysis || {};
   const swing = analysis.swing || {};
   const ball = analysis.ballFlight || analysis.impact || {};
+  const swingPlane = analysis.swing_plane || analysis.swingPlane || null;
+  const impactStability = analysis.impact_stability || analysis.impactStability || null;
+  const summary =
+    analysis.summary ||
+    (Array.isArray(analysis.coach_summary) ? analysis.coach_summary.join(' · ') : null) ||
+    (Array.isArray(analysis.coachSummary) ? analysis.coachSummary.join(' · ') : null) ||
+    null;
+  const coachSummary =
+    Array.isArray(analysis.coach_summary)
+      ? analysis.coach_summary
+      : Array.isArray(analysis.coachSummary)
+        ? analysis.coachSummary
+        : [];
+  const confidence =
+    typeof analysis.confidence === 'number'
+      ? analysis.confidence
+      : typeof analysis.confidence === 'string'
+        ? Number(analysis.confidence)
+        : null;
 
   const launchDir = (() => {
     const h = ball.horizontal_launch_direction;
@@ -379,8 +398,13 @@ function buildJobAnalysisPayload(shot) {
         launchAngle: ball.vertical_launch_angle ?? null,
         speedRelative: 'unknown',
       },
+      swingPlane,
+      impactStability,
     },
     pending: DEFAULT_PENDING_ITEMS,
+    summary,
+    coachSummary,
+    confidence: Number.isFinite(confidence) ? confidence : null,
     errorMessage: analysis?.errorMessage,
     meta: analysis?.meta,
   };
@@ -702,6 +726,20 @@ async function analyzeAndStoreUploadedShot(file, body) {
   const existing = shotStore.getShotByMediaName(file.filename);
   const sourceType = body.sourceType || existing?.sourceType || 'upload';
   const force = toBoolean(body.force);
+  const shotId = existing?.id || randomUUID();
+  const jobId = existing?.jobId || randomUUID();
+  const sessionId = body.sessionId
+    ? shotStore.ensureSessionPersisted(
+        body.sessionId,
+        body.sessionName || 'default',
+        { sourceType },
+      )
+    : existing?.sessionId ||
+      shotStore.ensureSessionPersisted(
+        undefined,
+        body.sessionName || 'default',
+        { sourceType },
+      );
   const meta = {
     club: body.club,
     fps: toNumberOrUndefined(body.fps),
@@ -715,22 +753,53 @@ async function analyzeAndStoreUploadedShot(file, body) {
     track_frames: toNumberOrUndefined(body.track_frames),
     sourceType,
   };
+  const resolvedMetaPath = resolveMetaPath(body.metaPath, jobId);
+
+  if (resolvedMetaPath) {
+    const metaReady = await waitForFile(resolvedMetaPath, 2000);
+    if (metaReady) {
+      const baseUrl = inferUrl('/v1/jobs');
+      if (baseUrl) {
+        const requestBody = {
+          mode: 'coach_from_meta',
+          jobId,
+          source: {
+            filename: file.filename,
+            videoPath: file.path,
+            metaPath: resolvedMetaPath,
+          },
+          options: { force: Boolean(force) },
+        };
+        const response = await inferFetchJson(baseUrl, {
+          method: 'POST',
+          body: requestBody,
+          timeoutMs: 2500,
+        });
+        if (response.ok || response.status === 409) {
+          const shot = {
+            id: shotId,
+            jobId,
+            status: 'queued',
+            sessionId,
+            sourceType,
+            createdAt: existing?.createdAt || new Date().toISOString(),
+            media: {
+              filename: file.filename,
+              path: file.path,
+              size: file.size,
+            },
+            metadata: { ...meta, metaPath: resolvedMetaPath },
+            analysis: null,
+          };
+          shotStore.upsertShot(shot);
+          return shot;
+        }
+      }
+    }
+  }
 
   const prepared = await prepareVideoForAnalysis(file.path, file.filename);
   if (prepared.ok === false) {
-    const sessionId = body.sessionId
-      ? shotStore.ensureSessionPersisted(
-          body.sessionId,
-          body.sessionName || 'default',
-          { sourceType },
-        )
-      : existing?.sessionId ||
-        shotStore.ensureSessionPersisted(
-          undefined,
-          body.sessionName || 'default',
-          { sourceType },
-        );
-
     const analysis = {
       analysisVersion: opencvAnalyzer.ANALYSIS_VERSION,
       errorCode: 'DECODE_FAILED',
@@ -748,8 +817,8 @@ async function analyzeAndStoreUploadedShot(file, body) {
       analysis_id: randomUUID(),
     };
     const shot = {
-      id: existing?.id || randomUUID(),
-      jobId: existing?.jobId || randomUUID(),
+      id: shotId,
+      jobId,
       status: 'failed',
       sessionId,
       sourceType,
@@ -824,25 +893,12 @@ async function analyzeAndStoreUploadedShot(file, body) {
     }
   }
 
-  const sessionId = body.sessionId
-    ? shotStore.ensureSessionPersisted(
-        body.sessionId,
-        body.sessionName || 'default',
-        { sourceType },
-      )
-    : existing?.sessionId ||
-      shotStore.ensureSessionPersisted(
-        undefined,
-        body.sessionName || 'default',
-        { sourceType },
-      );
-
   const failed = looksLikeAnalysisFailure(analysis) || !analysis;
   const status = failed ? 'failed' : 'succeeded';
 
   const shot = {
-    id: existing?.id || randomUUID(),
-    jobId: existing?.jobId || randomUUID(),
+    id: shotId,
+    jobId,
     status,
     sessionId,
     sourceType,
@@ -852,7 +908,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
       path: file.path,
       size: file.size,
     },
-    metadata: { ...meta, video: videoMeta },
+    metadata: { ...meta, video: videoMeta, metaPath: resolvedMetaPath || undefined },
     analysis,
   };
 
