@@ -754,6 +754,27 @@ async function analyzeAndStoreUploadedShot(file, body) {
     sourceType,
   };
   const resolvedMetaPath = resolveMetaPath(body.metaPath, jobId);
+  const createPendingShot = (patch = {}) => {
+    const shot = {
+      id: shotId,
+      jobId,
+      status: 'queued',
+      sessionId,
+      sourceType,
+      createdAt: existing?.createdAt || new Date().toISOString(),
+      media: {
+        filename: file.filename,
+        path: file.path,
+        size: file.size,
+      },
+      metadata: { ...meta, metaPath: resolvedMetaPath || undefined, ...patch.metadata },
+      analysis: patch.analysis ?? existing?.analysis ?? null,
+    };
+    shotStore.upsertShot(shot);
+    return shot;
+  };
+
+  createPendingShot();
 
   if (resolvedMetaPath) {
     const metaReady = await waitForFile(resolvedMetaPath, 2000);
@@ -776,23 +797,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
           timeoutMs: 2500,
         });
         if (response.ok || response.status === 409) {
-          const shot = {
-            id: shotId,
-            jobId,
-            status: 'queued',
-            sessionId,
-            sourceType,
-            createdAt: existing?.createdAt || new Date().toISOString(),
-            media: {
-              filename: file.filename,
-              path: file.path,
-              size: file.size,
-            },
-            metadata: { ...meta, metaPath: resolvedMetaPath },
-            analysis: null,
-          };
-          shotStore.upsertShot(shot);
-          return shot;
+          return createPendingShot();
         }
       }
     }
@@ -828,7 +833,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
         path: file.path,
         size: file.size,
       },
-      metadata: meta,
+      metadata: { ...meta, metaPath: resolvedMetaPath || undefined },
       analysis,
     };
     shotStore.upsertShot(shot);
