@@ -1,9 +1,12 @@
 const path = require('path');
+const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { spawn } = require('child_process');
 
 const pythonWorkerPath = path.join(__dirname, 'opencv_worker.py');
 const pythonPrecheckPath = path.join(__dirname, 'precheck_worker.py');
+const localVenvPython = path.join(__dirname, '..', '.venv', 'bin', 'python');
+const pythonBin = process.env.PYTHON_BIN || (fs.existsSync(localVenvPython) ? localVenvPython : 'python3');
 
 // Build a normalized frame sequence descriptor. This is a placeholder for
 // future OpenCV-based extraction.
@@ -15,6 +18,12 @@ function buildFrameSequenceFromFile(filePath, meta = {}) {
     fps: meta.fps ? Number(meta.fps) : undefined,
     camera: meta.cameraConfig || {},
     roi: meta.roi,
+    cam_distance: meta.cam_distance,
+    cam_height: meta.cam_height,
+    h_fov: meta.h_fov,
+    v_fov: meta.v_fov,
+    impact_frame: meta.impact_frame,
+    track_frames: meta.track_frames,
     frames: [], // TODO: populate with extracted frames when analysis is implemented
   };
 }
@@ -68,7 +77,7 @@ function coachSummaryGenerator({ swing, ballFlight, shotType }) {
 
 async function runPythonAnalysis(frameSeq) {
   return new Promise((resolve, reject) => {
-    const proc = spawn('python3', [pythonWorkerPath]);
+    const proc = spawn(pythonBin, [pythonWorkerPath]);
     let stdout = '';
     let stderr = '';
     proc.stdout.on('data', (d) => {
@@ -92,6 +101,12 @@ async function runPythonAnalysis(frameSeq) {
         path: frameSeq.path,
         fps: frameSeq.fps,
         roi: frameSeq.roi,
+        cam_distance: frameSeq.cam_distance,
+        cam_height: frameSeq.cam_height,
+        h_fov: frameSeq.h_fov,
+        v_fov: frameSeq.v_fov,
+        impact_frame: frameSeq.impact_frame,
+        track_frames: frameSeq.track_frames,
       }),
     );
     proc.stdin.end();
@@ -100,7 +115,7 @@ async function runPythonAnalysis(frameSeq) {
 
 async function runPythonPrecheck(frameSeq, config = {}, timeoutMs = 1200) {
   return new Promise((resolve, reject) => {
-    const proc = spawn('python3', [pythonPrecheckPath]);
+    const proc = spawn(pythonBin, [pythonPrecheckPath]);
     let stdout = '';
     let stderr = '';
 

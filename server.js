@@ -291,8 +291,8 @@ function toBoolean(value) {
 
 function looksLikeAnalysisFailure(analysis) {
   if (!analysis) return false;
-  if (analysis.errorMessage) return true;
   if (analysis.errorCode) return true;
+  if (analysis.errorMessage && !analysis.warningCode) return true;
   const coach = analysis.coach_summary;
   if (Array.isArray(coach)) {
     return coach.some(
@@ -686,6 +686,12 @@ async function analyzeAndStoreUploadedShot(file, body) {
     fps: toNumberOrUndefined(body.fps),
     cameraConfig: body.cameraConfig,
     roi: body.roi,
+    cam_distance: toNumberOrUndefined(body.cam_distance),
+    cam_height: toNumberOrUndefined(body.cam_height),
+    h_fov: toNumberOrUndefined(body.h_fov),
+    v_fov: toNumberOrUndefined(body.v_fov),
+    impact_frame: toNumberOrUndefined(body.impact_frame),
+    track_frames: toNumberOrUndefined(body.track_frames),
     sourceType,
   };
 
@@ -759,7 +765,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
       sampleFrames: 8,
       minDurationSec: 0.6,
       minFrames: 20,
-      motionThreshold: 2.0,
+      motionThreshold: 0.35,
       resizeWidth: 160,
     });
     if (precheckResult?.ok === true && precheckResult?.isSwing === false) {
@@ -847,7 +853,11 @@ const analyzeUploadHandler = async (req, res) => {
     res.json({ ok: true, shot });
   } catch (err) {
     console.error('analyze/upload failed', err);
-    res.status(500).json({ ok: false, message: 'Analysis failed' });
+    res.status(500).json({
+      ok: false,
+      message: err.message || 'Analysis failed',
+      errorMessage: err.message || 'Analysis failed',
+    });
   }
 };
 app.post('/analyze/upload', upload.single('video'), analyzeUploadHandler);
@@ -904,7 +914,11 @@ app.post('/api/analyze', upload.single('video'), async (req, res) => {
     });
   } catch (err) {
     console.error('analyze job failed', err);
-    return res.status(500).json({ error: 'Analysis failed' });
+    return res.status(500).json({
+      ok: false,
+      error: err.message || 'Analysis failed',
+      errorMessage: err.message || 'Analysis failed',
+    });
   }
 });
 
@@ -1141,8 +1155,27 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
   return { status: mappedStatus, analysis };
 }
 
+function buildShotJobResponse(jobId) {
+  const shot = shotStore.getShotByJobId(jobId);
+  if (!shot) return null;
+  const analysis = buildJobAnalysisPayload(shot);
+  return {
+    ok: true,
+    jobId,
+    status: shot.status || analysis.status || 'succeeded',
+    analysis,
+    errorCode: analysis?.errorCode ?? null,
+    errorMessage: analysis?.errorMessage ?? null,
+  };
+}
+
 async function respondJobStatus(req, res) {
   const jobId = req.params.jobId;
+  const shotPayload = buildShotJobResponse(jobId);
+  if (shotPayload) {
+    return res.json(shotPayload);
+  }
+
   const inferPayload = await fetchInferJobPayload(jobId, { includeResult: false });
   if (!inferPayload?.notFound) {
     return res.json({
@@ -1155,20 +1188,16 @@ async function respondJobStatus(req, res) {
     });
   }
 
-  const shot = shotStore.getShotByJobId(jobId);
-  if (!shot) {
-    return res.status(404).json({ ok: false, message: 'Job not found' });
-  }
-  return res.json({
-    ok: true,
-    jobId,
-    status: shot.status || 'succeeded',
-    analysis: buildJobAnalysisPayload(shot),
-  });
+  return res.status(404).json({ ok: false, message: 'Job not found' });
 }
 
 async function respondJobResult(req, res) {
   const jobId = req.params.jobId;
+  const shotPayload = buildShotJobResponse(jobId);
+  if (shotPayload) {
+    return res.json(shotPayload);
+  }
+
   const inferPayload = await fetchInferJobPayload(jobId, { includeResult: true });
   if (!inferPayload?.notFound) {
     return res.json({
@@ -1181,16 +1210,7 @@ async function respondJobResult(req, res) {
     });
   }
 
-  const shot = shotStore.getShotByJobId(jobId);
-  if (!shot) {
-    return res.status(404).json({ ok: false, message: 'Job not found' });
-  }
-  return res.json({
-    ok: true,
-    jobId,
-    status: shot.status || 'succeeded',
-    analysis: buildJobAnalysisPayload(shot),
-  });
+  return res.status(404).json({ ok: false, message: 'Job not found' });
 }
 
 app.get('/api/analyze/:jobId', respondJobStatus);
@@ -1279,7 +1299,11 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
     });
   } catch (err) {
     console.error('upload with analyze failed', err);
-    return res.status(500).json({ ok: false, message: 'Analysis failed' });
+    return res.status(500).json({
+      ok: false,
+      message: err.message || 'Analysis failed',
+      errorMessage: err.message || 'Analysis failed',
+    });
   }
 });
 
