@@ -734,6 +734,7 @@ async function requestUploadMetaGeneration({
   filename,
   inputPath,
   force,
+  durationSec,
 }) {
   const url = cameraUrl('/api/meta/from-file');
   if (!url || !jobId || !filename || !inputPath) return null;
@@ -745,12 +746,96 @@ async function requestUploadMetaGeneration({
       inputPath,
       model: 'yolov8n_service7',
       force: Boolean(force),
+      durationSec,
     },
-    timeoutMs: 20_000,
+    timeoutMs: 120_000,
   });
   if (!response.ok) return null;
   const metaPath = response.json?.metaPath;
   return typeof metaPath === 'string' ? metaPath : null;
+}
+
+function buildQueuedUploadShot(file, body) {
+  const existing = shotStore.getShotByMediaName(file.filename);
+  const sourceType = body.sourceType || existing?.sourceType || 'upload';
+  const jobId = existing?.jobId || randomUUID();
+  const shotId = existing?.id || randomUUID();
+  const sessionId = body.sessionId
+    ? shotStore.ensureSessionPersisted(
+        body.sessionId,
+        body.sessionName || 'default',
+        { sourceType },
+      )
+    : existing?.sessionId ||
+      shotStore.ensureSessionPersisted(
+        undefined,
+        body.sessionName || 'default',
+        { sourceType },
+      );
+  const metadata = {
+    club: body.club,
+    fps: toNumberOrUndefined(body.fps),
+    cameraConfig: body.cameraConfig,
+    roi: body.roi,
+    cam_distance: toNumberOrUndefined(body.cam_distance),
+    cam_height: toNumberOrUndefined(body.cam_height),
+    h_fov: toNumberOrUndefined(body.h_fov),
+    v_fov: toNumberOrUndefined(body.v_fov),
+    impact_frame: toNumberOrUndefined(body.impact_frame),
+    track_frames: toNumberOrUndefined(body.track_frames),
+    sourceType,
+  };
+  const queuedShot = {
+    id: shotId,
+    jobId,
+    status: 'queued',
+    sessionId,
+    sourceType,
+    createdAt: existing?.createdAt || new Date().toISOString(),
+    media: {
+      filename: file.filename,
+      path: file.path,
+      size: file.size,
+    },
+    metadata: {
+      ...metadata,
+      metaPath: resolveMetaPath(body.metaPath, jobId) || undefined,
+    },
+    analysis: existing?.analysis ?? null,
+  };
+  shotStore.upsertShot(queuedShot);
+  return queuedShot;
+}
+
+function markQueuedUploadShotFailed(file, errorMessage) {
+  const existing = shotStore.getShotByMediaName(file.filename);
+  if (!existing) return;
+  shotStore.upsertShot({
+    ...existing,
+    status: 'failed',
+    analysis: {
+      analysisVersion: existing.analysis?.analysisVersion || opencvAnalyzer.ANALYSIS_VERSION,
+      errorCode: 'UPLOAD_ANALYSIS_FAILED',
+      errorMessage,
+      events: existing.analysis?.events || {},
+      swing: null,
+      ballFlight: null,
+      shot_type: 'unknown',
+      coach_summary: [`analysis failed: ${errorMessage}`],
+      analysis_id: randomUUID(),
+    },
+  });
+}
+
+function queueUploadedShotAnalysis(file, body) {
+  const queuedShot = buildQueuedUploadShot(file, body);
+  setImmediate(() => {
+    analyzeAndStoreUploadedShot(file, body).catch((err) => {
+      console.error('queued upload analysis failed', err);
+      markQueuedUploadShotFailed(file, err.message || 'Analysis failed');
+    });
+  });
+  return queuedShot;
 }
 
 async function analyzeAndStoreUploadedShot(file, body) {
