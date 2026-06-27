@@ -291,8 +291,8 @@ function toBoolean(value) {
 
 function looksLikeAnalysisFailure(analysis) {
   if (!analysis) return false;
-  if (analysis.errorMessage) return true;
   if (analysis.errorCode) return true;
+  if (analysis.errorMessage && !analysis.warningCode) return true;
   const coach = analysis.coach_summary;
   if (Array.isArray(coach)) {
     return coach.some(
@@ -380,9 +380,7 @@ function buildJobAnalysisPayload(shot) {
         speedRelative: 'unknown',
       },
     },
-    pending: [
-      { key: 'club_tracking', label: '클럽 추적', description: '향후 스윙 이벤트/클럽 경로', status: 'coming-soon' },
-    ],
+    pending: DEFAULT_PENDING_ITEMS,
     errorMessage: analysis?.errorMessage,
     meta: analysis?.meta,
   };
@@ -457,7 +455,8 @@ function formatAnalysisForFrontend(raw) {
 }
 
 const DEFAULT_PENDING_ITEMS = [
-  { key: 'club_tracking', label: '클럽 추적', description: '향후 스윙 이벤트/클럽 경로', status: 'coming-soon' },
+  { key: 'pelvis_pose', label: '골반 회전', description: '포즈 키포인트 모델 연동 후 직접 판정', status: 'coming-soon' },
+  { key: 'attack_angle', label: 'Attack Angle', description: '정면/측면 보정값 확보 후 제공', status: 'coming-soon' },
 ];
 
 function resolveUploadPath(filename) {
@@ -547,11 +546,22 @@ function buildJobAnalysisPayloadFromAnalysis(jobId, status, analysis) {
 
 function buildCoachAnalysisPayload(jobId, status, result) {
   const tempo = result?.metrics?.tempo || {};
+  const metrics = result?.metrics || {};
   const impactMs =
     result?.events?.impactMs ??
     result?.events?.impact?.timeMs ??
     result?.events?.impact?.time_ms ??
     null;
+  const eventValue = (key) =>
+    result?.events?.[`${key}Ms`] ??
+    result?.events?.[key]?.timeMs ??
+    result?.events?.[key]?.time_ms ??
+    result?.metrics?.eventTiming?.[key] ??
+    null;
+  const eventObject = (key) => {
+    const value = eventValue(key);
+    return value !== null && value !== undefined ? { timeMs: value } : null;
+  };
   const ratioValue =
     tempo.ratio === null || tempo.ratio === undefined
       ? null
@@ -565,10 +575,10 @@ function buildCoachAnalysisPayload(jobId, status, result) {
     analysisVersion: result?.analysisVersion || 'coach-meta-v1',
     errorCode: result?.errorCode ?? null,
     events: {
-      address: null,
-      top: null,
-      impact: impactMs !== null ? { timeMs: impactMs } : null,
-      finish: null,
+      address: eventObject('address'),
+      top: eventObject('top'),
+      impact: eventObject('impact') || (impactMs !== null ? { timeMs: impactMs } : null),
+      finish: eventObject('finish'),
     },
     metrics: {
       tempo: {
@@ -577,19 +587,28 @@ function buildCoachAnalysisPayload(jobId, status, result) {
         ratio: ratioValue,
       },
       eventTiming: {
-        address: null,
-        top: null,
-        impact: impactMs ?? null,
-        finish: null,
+        address: eventValue('address'),
+        top: eventValue('top'),
+        impact: eventValue('impact'),
+        finish: eventValue('finish'),
       },
-      ball: {
+      ball: metrics.ball || {
         launchDirection: 'unknown',
         launchAngle: null,
         speedRelative: 'unknown',
       },
+      swingPlane: metrics.swingPlane ?? null,
+      impactStability: metrics.impactStability ?? null,
+      shaftPlane: metrics.shaftPlane ?? null,
+      backswing: metrics.backswing ?? null,
+      readiness: metrics.readiness ?? null,
+      trackingQuality: metrics.trackingQuality ?? null,
     },
     pending: DEFAULT_PENDING_ITEMS,
     errorMessage: result?.errorMessage ?? null,
+    summary: result?.summary ?? null,
+    coachSummary: result?.coachSummary ?? result?.coach_summary ?? [],
+    confidence: result?.confidence ?? null,
     meta: result?.meta ?? null,
   };
 }
@@ -606,10 +625,12 @@ function normalizeInferResult(jobId, status, result) {
     return normalizeInferResult(jobId, status, result.analysis);
   }
   if (isJobAnalysisPayload(result)) {
+    const mappedStatus = result.status === 'done' ? 'succeeded' : result.status === 'failed' ? 'failed' : result.status;
     return {
       ...result,
       jobId: result.jobId || jobId,
-      status: result.status || (status === 'done' ? 'succeeded' : status === 'failed' ? 'failed' : 'running'),
+      status: mappedStatus || (status === 'done' ? 'succeeded' : status === 'failed' ? 'failed' : 'running'),
+      pending: result.pending || DEFAULT_PENDING_ITEMS,
     };
   }
   if (result.swing || result.ballFlight || result.impact) {
@@ -686,6 +707,12 @@ async function analyzeAndStoreUploadedShot(file, body) {
     fps: toNumberOrUndefined(body.fps),
     cameraConfig: body.cameraConfig,
     roi: body.roi,
+    cam_distance: toNumberOrUndefined(body.cam_distance),
+    cam_height: toNumberOrUndefined(body.cam_height),
+    h_fov: toNumberOrUndefined(body.h_fov),
+    v_fov: toNumberOrUndefined(body.v_fov),
+    impact_frame: toNumberOrUndefined(body.impact_frame),
+    track_frames: toNumberOrUndefined(body.track_frames),
     sourceType,
   };
 
@@ -759,7 +786,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
       sampleFrames: 8,
       minDurationSec: 0.6,
       minFrames: 20,
-      motionThreshold: 2.0,
+      motionThreshold: 0.35,
       resizeWidth: 160,
     });
     if (precheckResult?.ok === true && precheckResult?.isSwing === false) {
@@ -847,7 +874,11 @@ const analyzeUploadHandler = async (req, res) => {
     res.json({ ok: true, shot });
   } catch (err) {
     console.error('analyze/upload failed', err);
-    res.status(500).json({ ok: false, message: 'Analysis failed' });
+    res.status(500).json({
+      ok: false,
+      message: err.message || 'Analysis failed',
+      errorMessage: err.message || 'Analysis failed',
+    });
   }
 };
 app.post('/analyze/upload', upload.single('video'), analyzeUploadHandler);
@@ -904,7 +935,11 @@ app.post('/api/analyze', upload.single('video'), async (req, res) => {
     });
   } catch (err) {
     console.error('analyze job failed', err);
-    return res.status(500).json({ error: 'Analysis failed' });
+    return res.status(500).json({
+      ok: false,
+      error: err.message || 'Analysis failed',
+      errorMessage: err.message || 'Analysis failed',
+    });
   }
 });
 
@@ -1141,8 +1176,27 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
   return { status: mappedStatus, analysis };
 }
 
+function buildShotJobResponse(jobId) {
+  const shot = shotStore.getShotByJobId(jobId);
+  if (!shot) return null;
+  const analysis = buildJobAnalysisPayload(shot);
+  return {
+    ok: true,
+    jobId,
+    status: shot.status || analysis.status || 'succeeded',
+    analysis,
+    errorCode: analysis?.errorCode ?? null,
+    errorMessage: analysis?.errorMessage ?? null,
+  };
+}
+
 async function respondJobStatus(req, res) {
   const jobId = req.params.jobId;
+  const shotPayload = buildShotJobResponse(jobId);
+  if (shotPayload) {
+    return res.json(shotPayload);
+  }
+
   const inferPayload = await fetchInferJobPayload(jobId, { includeResult: false });
   if (!inferPayload?.notFound) {
     return res.json({
@@ -1155,20 +1209,16 @@ async function respondJobStatus(req, res) {
     });
   }
 
-  const shot = shotStore.getShotByJobId(jobId);
-  if (!shot) {
-    return res.status(404).json({ ok: false, message: 'Job not found' });
-  }
-  return res.json({
-    ok: true,
-    jobId,
-    status: shot.status || 'succeeded',
-    analysis: buildJobAnalysisPayload(shot),
-  });
+  return res.status(404).json({ ok: false, message: 'Job not found' });
 }
 
 async function respondJobResult(req, res) {
   const jobId = req.params.jobId;
+  const shotPayload = buildShotJobResponse(jobId);
+  if (shotPayload) {
+    return res.json(shotPayload);
+  }
+
   const inferPayload = await fetchInferJobPayload(jobId, { includeResult: true });
   if (!inferPayload?.notFound) {
     return res.json({
@@ -1181,16 +1231,7 @@ async function respondJobResult(req, res) {
     });
   }
 
-  const shot = shotStore.getShotByJobId(jobId);
-  if (!shot) {
-    return res.status(404).json({ ok: false, message: 'Job not found' });
-  }
-  return res.json({
-    ok: true,
-    jobId,
-    status: shot.status || 'succeeded',
-    analysis: buildJobAnalysisPayload(shot),
-  });
+  return res.status(404).json({ ok: false, message: 'Job not found' });
 }
 
 app.get('/api/analyze/:jobId', respondJobStatus);
@@ -1279,7 +1320,11 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
     });
   } catch (err) {
     console.error('upload with analyze failed', err);
-    return res.status(500).json({ ok: false, message: 'Analysis failed' });
+    return res.status(500).json({
+      ok: false,
+      message: err.message || 'Analysis failed',
+      errorMessage: err.message || 'Analysis failed',
+    });
   }
 });
 

@@ -132,24 +132,29 @@ def precheck(video_path: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
             },
         }
 
-    # Motion gate: sample a small number of frames early and measure mean abs diff.
+    # Motion gate: sample across the clip. Swing uploads often start with
+    # address/setup, so checking only the first second creates false negatives.
     max_window_frames = int(max(1.0, sample_window_sec) * fps)
     if frame_count > 0:
-        window_frames = min(frame_count, max_window_frames)
+        window_frames = frame_count
     else:
         window_frames = max_window_frames
 
-    step = max(1, window_frames // sample_frames)
+    if frame_count > 0:
+        positions = np.linspace(0, max(0, window_frames - 1), sample_frames, dtype=int)
+    else:
+        step = max(1, window_frames // sample_frames)
+        positions = np.array([idx * step for idx in range(sample_frames)], dtype=int)
 
     diffs = []
     frames_sampled = 0
     prev_gray = None
 
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    while frames_sampled < sample_frames:
+    for frame_pos in positions:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_pos))
         ret, frame = cap.read()
         if not ret:
-            break
+            continue
 
         # Resize to keep CPU cost low
         h, w = frame.shape[:2]
@@ -162,10 +167,6 @@ def precheck(video_path: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
             diffs.append(_mean_abs_diff(prev_gray, gray))
         prev_gray = gray
         frames_sampled += 1
-
-        # Skip ahead cheaply without decoding full frames
-        for _ in range(step - 1):
-            cap.grab()
 
     cap.release()
 
@@ -187,7 +188,7 @@ def precheck(video_path: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     mean_diff = float(np.mean(diffs))
     max_diff = float(np.max(diffs))
 
-    if mean_diff < motion_threshold:
+    if mean_diff < motion_threshold and max_diff < motion_threshold * 2:
         return {
             "ok": True,
             "isSwing": False,
@@ -233,4 +234,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
