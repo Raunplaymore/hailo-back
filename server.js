@@ -412,15 +412,16 @@ function buildJobAnalysisPayload(shot) {
 }
 
 function mapShotToFileEntry(shot) {
+  const analysis = buildJobAnalysisPayload(shot);
   return {
     id: shot.id,
     filename: shot.media?.filename,
     jobId: shot.jobId,
-    status: shot.status || 'succeeded',
+    status: analysis?.status || shot.status || 'succeeded',
     createdAt: shot.createdAt,
     sourceType: shot.sourceType || 'upload',
     videoUrl: uploadsUrl(shot.media?.filename),
-    analysis: buildJobAnalysisPayload(shot),
+    analysis,
   };
 }
 
