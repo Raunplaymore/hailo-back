@@ -380,9 +380,7 @@ function buildJobAnalysisPayload(shot) {
         speedRelative: 'unknown',
       },
     },
-    pending: [
-      { key: 'club_tracking', label: '클럽 추적', description: '향후 스윙 이벤트/클럽 경로', status: 'coming-soon' },
-    ],
+    pending: DEFAULT_PENDING_ITEMS,
     errorMessage: analysis?.errorMessage,
     meta: analysis?.meta,
   };
@@ -457,7 +455,8 @@ function formatAnalysisForFrontend(raw) {
 }
 
 const DEFAULT_PENDING_ITEMS = [
-  { key: 'club_tracking', label: '클럽 추적', description: '향후 스윙 이벤트/클럽 경로', status: 'coming-soon' },
+  { key: 'pelvis_pose', label: '골반 회전', description: '포즈 키포인트 모델 연동 후 직접 판정', status: 'coming-soon' },
+  { key: 'attack_angle', label: 'Attack Angle', description: '정면/측면 보정값 확보 후 제공', status: 'coming-soon' },
 ];
 
 function resolveUploadPath(filename) {
@@ -547,11 +546,22 @@ function buildJobAnalysisPayloadFromAnalysis(jobId, status, analysis) {
 
 function buildCoachAnalysisPayload(jobId, status, result) {
   const tempo = result?.metrics?.tempo || {};
+  const metrics = result?.metrics || {};
   const impactMs =
     result?.events?.impactMs ??
     result?.events?.impact?.timeMs ??
     result?.events?.impact?.time_ms ??
     null;
+  const eventValue = (key) =>
+    result?.events?.[`${key}Ms`] ??
+    result?.events?.[key]?.timeMs ??
+    result?.events?.[key]?.time_ms ??
+    result?.metrics?.eventTiming?.[key] ??
+    null;
+  const eventObject = (key) => {
+    const value = eventValue(key);
+    return value !== null && value !== undefined ? { timeMs: value } : null;
+  };
   const ratioValue =
     tempo.ratio === null || tempo.ratio === undefined
       ? null
@@ -565,10 +575,10 @@ function buildCoachAnalysisPayload(jobId, status, result) {
     analysisVersion: result?.analysisVersion || 'coach-meta-v1',
     errorCode: result?.errorCode ?? null,
     events: {
-      address: null,
-      top: null,
-      impact: impactMs !== null ? { timeMs: impactMs } : null,
-      finish: null,
+      address: eventObject('address'),
+      top: eventObject('top'),
+      impact: eventObject('impact') || (impactMs !== null ? { timeMs: impactMs } : null),
+      finish: eventObject('finish'),
     },
     metrics: {
       tempo: {
@@ -577,19 +587,28 @@ function buildCoachAnalysisPayload(jobId, status, result) {
         ratio: ratioValue,
       },
       eventTiming: {
-        address: null,
-        top: null,
-        impact: impactMs ?? null,
-        finish: null,
+        address: eventValue('address'),
+        top: eventValue('top'),
+        impact: eventValue('impact'),
+        finish: eventValue('finish'),
       },
-      ball: {
+      ball: metrics.ball || {
         launchDirection: 'unknown',
         launchAngle: null,
         speedRelative: 'unknown',
       },
+      swingPlane: metrics.swingPlane ?? null,
+      impactStability: metrics.impactStability ?? null,
+      shaftPlane: metrics.shaftPlane ?? null,
+      backswing: metrics.backswing ?? null,
+      readiness: metrics.readiness ?? null,
+      trackingQuality: metrics.trackingQuality ?? null,
     },
     pending: DEFAULT_PENDING_ITEMS,
     errorMessage: result?.errorMessage ?? null,
+    summary: result?.summary ?? null,
+    coachSummary: result?.coachSummary ?? result?.coach_summary ?? [],
+    confidence: result?.confidence ?? null,
     meta: result?.meta ?? null,
   };
 }
@@ -606,10 +625,12 @@ function normalizeInferResult(jobId, status, result) {
     return normalizeInferResult(jobId, status, result.analysis);
   }
   if (isJobAnalysisPayload(result)) {
+    const mappedStatus = result.status === 'done' ? 'succeeded' : result.status === 'failed' ? 'failed' : result.status;
     return {
       ...result,
       jobId: result.jobId || jobId,
-      status: result.status || (status === 'done' ? 'succeeded' : status === 'failed' ? 'failed' : 'running'),
+      status: mappedStatus || (status === 'done' ? 'succeeded' : status === 'failed' ? 'failed' : 'running'),
+      pending: result.pending || DEFAULT_PENDING_ITEMS,
     };
   }
   if (result.swing || result.ballFlight || result.impact) {
