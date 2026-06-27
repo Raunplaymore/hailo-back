@@ -1084,7 +1084,7 @@ const analyzeUploadHandler = async (req, res) => {
   }
 
   try {
-    const shot = await analyzeAndStoreUploadedShot(req.file, {
+    const shot = queueUploadedShotAnalysis(req.file, {
       ...(req.body || {}),
       force: toBoolean(req.body?.force) || toBoolean(req.query?.force),
     });
@@ -1139,7 +1139,7 @@ app.post('/api/analyze', upload.single('video'), async (req, res) => {
     return res.status(400).json({ error: 'No file uploaded' });
   }
   try {
-    const shot = await analyzeAndStoreUploadedShot(req.file, {
+    const shot = queueUploadedShotAnalysis(req.file, {
       ...(req.body || {}),
       force: toBoolean(req.body?.force) || toBoolean(req.query?.force),
     });
@@ -1524,7 +1524,7 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
     });
   }
   try {
-    const shot = await analyzeAndStoreUploadedShot(req.file, {
+    const shot = queueUploadedShotAnalysis(req.file, {
       ...(req.body || {}),
       force: toBoolean(req.body?.force) || toBoolean(req.query?.force),
     });
