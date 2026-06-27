@@ -25,6 +25,7 @@ const dataDir =
 const metaDir = process.env.META_DIR || '/tmp';
 const healthDir = path.join(__dirname, 'health');
 const inferBaseUrl = process.env.INFER_BASE_URL || 'http://127.0.0.1:3002';
+const cameraBaseUrl = process.env.CAMERA_BASE_URL || 'http://127.0.0.1:3001';
 const analysisCacheDir = path.join(dataDir, 'analysis');
 
 // Ensure upload directory exists
@@ -695,6 +696,12 @@ function inferUrl(pathname) {
   return `${base}${pathname}`;
 }
 
+function cameraUrl(pathname) {
+  if (!cameraBaseUrl) return null;
+  const base = cameraBaseUrl.replace(/\/$/, '');
+  return `${base}${pathname}`;
+}
+
 async function inferFetchJson(url, { method = 'GET', body, timeoutMs = 2000 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -720,6 +727,30 @@ async function inferFetchJson(url, { method = 'GET', body, timeoutMs = 2000 } = 
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function requestUploadMetaGeneration({
+  jobId,
+  filename,
+  inputPath,
+  force,
+}) {
+  const url = cameraUrl('/api/meta/from-file');
+  if (!url || !jobId || !filename || !inputPath) return null;
+  const response = await inferFetchJson(url, {
+    method: 'POST',
+    body: {
+      jobId,
+      filename,
+      inputPath,
+      model: 'yolov8n_service7',
+      force: Boolean(force),
+    },
+    timeoutMs: 20_000,
+  });
+  if (!response.ok) return null;
+  const metaPath = response.json?.metaPath;
+  return typeof metaPath === 'string' ? metaPath : null;
 }
 
 async function analyzeAndStoreUploadedShot(file, body) {
@@ -753,7 +784,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
     track_frames: toNumberOrUndefined(body.track_frames),
     sourceType,
   };
-  const resolvedMetaPath = resolveMetaPath(body.metaPath, jobId);
+  let effectiveMetaPath = resolveMetaPath(body.metaPath, jobId);
   const createPendingShot = (patch = {}) => {
     const shot = {
       id: shotId,
@@ -767,7 +798,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
         path: file.path,
         size: file.size,
       },
-      metadata: { ...meta, metaPath: resolvedMetaPath || undefined, ...patch.metadata },
+      metadata: { ...meta, metaPath: effectiveMetaPath || undefined, ...patch.metadata },
       analysis: patch.analysis ?? existing?.analysis ?? null,
     };
     shotStore.upsertShot(shot);
@@ -776,8 +807,8 @@ async function analyzeAndStoreUploadedShot(file, body) {
 
   createPendingShot();
 
-  if (resolvedMetaPath) {
-    const metaReady = await waitForFile(resolvedMetaPath, 2000);
+  if (effectiveMetaPath) {
+    const metaReady = await waitForFile(effectiveMetaPath, 2000);
     if (metaReady) {
       const baseUrl = inferUrl('/v1/jobs');
       if (baseUrl) {
@@ -787,7 +818,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
           source: {
             filename: file.filename,
             videoPath: file.path,
-            metaPath: resolvedMetaPath,
+            metaPath: effectiveMetaPath,
           },
           options: { force: Boolean(force) },
         };
@@ -833,11 +864,51 @@ async function analyzeAndStoreUploadedShot(file, body) {
         path: file.path,
         size: file.size,
       },
-      metadata: { ...meta, metaPath: resolvedMetaPath || undefined },
+      metadata: { ...meta, metaPath: effectiveMetaPath || undefined },
       analysis,
     };
     shotStore.upsertShot(shot);
     return shot;
+  }
+
+  if (!effectiveMetaPath) {
+    const generatedMetaPath = await requestUploadMetaGeneration({
+      jobId,
+      filename: file.filename,
+      inputPath: prepared.path,
+      force,
+    });
+    if (generatedMetaPath) {
+      effectiveMetaPath = resolveMetaPath(generatedMetaPath, jobId);
+      createPendingShot();
+    }
+  }
+
+  if (effectiveMetaPath) {
+    const metaReady = await waitForFile(effectiveMetaPath, 2000);
+    if (metaReady) {
+      const baseUrl = inferUrl('/v1/jobs');
+      if (baseUrl) {
+        const requestBody = {
+          mode: 'coach_from_meta',
+          jobId,
+          source: {
+            filename: file.filename,
+            videoPath: prepared.path,
+            metaPath: effectiveMetaPath,
+          },
+          options: { force: Boolean(force) },
+        };
+        const response = await inferFetchJson(baseUrl, {
+          method: 'POST',
+          body: requestBody,
+          timeoutMs: 2500,
+        });
+        if (response.ok || response.status === 409) {
+          return createPendingShot();
+        }
+      }
+    }
   }
 
   const videoMeta = await getVideoMeta(prepared.path);
@@ -913,7 +984,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
       path: file.path,
       size: file.size,
     },
-    metadata: { ...meta, video: videoMeta, metaPath: resolvedMetaPath || undefined },
+    metadata: { ...meta, video: videoMeta, metaPath: effectiveMetaPath || undefined },
     analysis,
   };
 
