@@ -1192,11 +1192,6 @@ function buildShotJobResponse(jobId) {
 
 async function respondJobStatus(req, res) {
   const jobId = req.params.jobId;
-  const shotPayload = buildShotJobResponse(jobId);
-  if (shotPayload) {
-    return res.json(shotPayload);
-  }
-
   const inferPayload = await fetchInferJobPayload(jobId, { includeResult: false });
   if (!inferPayload?.notFound) {
     return res.json({
@@ -1209,16 +1204,16 @@ async function respondJobStatus(req, res) {
     });
   }
 
-  return res.status(404).json({ ok: false, message: 'Job not found' });
-}
-
-async function respondJobResult(req, res) {
-  const jobId = req.params.jobId;
   const shotPayload = buildShotJobResponse(jobId);
   if (shotPayload) {
     return res.json(shotPayload);
   }
 
+  return res.status(404).json({ ok: false, message: 'Job not found' });
+}
+
+async function respondJobResult(req, res) {
+  const jobId = req.params.jobId;
   const inferPayload = await fetchInferJobPayload(jobId, { includeResult: true });
   if (!inferPayload?.notFound) {
     return res.json({
@@ -1229,6 +1224,11 @@ async function respondJobResult(req, res) {
       errorCode: inferPayload.analysis?.errorCode ?? null,
       errorMessage: inferPayload.analysis?.errorMessage ?? null,
     });
+  }
+
+  const shotPayload = buildShotJobResponse(jobId);
+  if (shotPayload) {
+    return res.json(shotPayload);
   }
 
   return res.status(404).json({ ok: false, message: 'Job not found' });
