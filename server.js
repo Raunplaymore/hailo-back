@@ -805,6 +805,7 @@ function cameraUrl(pathname) {
 async function inferFetchJson(url, { method = 'GET', body, timeoutMs = 2000 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const startedAt = Date.now();
   try {
     const res = await fetch(url, {
       method,
@@ -821,12 +822,156 @@ async function inferFetchJson(url, { method = 'GET', body, timeoutMs = 2000 } = 
         json = null;
       }
     }
-    return { ok: res.ok, status: res.status, json };
+    return {
+      ok: res.ok,
+      status: res.status,
+      json,
+      textSnippet: typeof text === 'string' ? text.slice(0, 400) : '',
+      durationMs: Date.now() - startedAt,
+    };
   } catch (error) {
-    return { ok: false, status: 0, error };
+    return {
+      ok: false,
+      status: 0,
+      error,
+      durationMs: Date.now() - startedAt,
+      textSnippet: '',
+    };
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function sleep(ms) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function awaitInferJobVisibility(
+  jobId,
+  { attempts = 8, intervalMs = 1000, timeoutMs = 1500 } = {},
+) {
+  const statusUrl = inferUrl(`/v1/jobs/${encodeURIComponent(jobId)}`);
+  if (!statusUrl) {
+    return {
+      visible: false,
+      errorMessage: 'infer service not configured',
+      lastStatus: 0,
+    };
+  }
+
+  let lastStatus = 0;
+  let lastErrorMessage = null;
+  let attemptsUsed = 0;
+  let lastDurationMs = 0;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const statusRes = await inferFetchJson(statusUrl, { timeoutMs });
+    attemptsUsed = attempt + 1;
+    lastStatus = statusRes.status;
+    lastDurationMs = statusRes.durationMs || 0;
+    if (statusRes.ok) {
+      return {
+        visible: true,
+        status: mapInferStatus(statusRes.json?.status || statusRes.json?.state),
+        payload: statusRes.json,
+        lastStatus,
+        attemptsUsed,
+        lastDurationMs,
+      };
+    }
+
+    lastErrorMessage =
+      statusRes.json?.message ||
+      statusRes.json?.error ||
+      statusRes.error?.message ||
+      lastErrorMessage;
+
+    if (attempt < attempts - 1) {
+      await sleep(intervalMs);
+    }
+  }
+
+  return {
+    visible: false,
+    errorMessage: lastErrorMessage || 'infer job did not become visible in time',
+    lastStatus,
+    attemptsUsed,
+    lastDurationMs,
+  };
+}
+
+async function submitInferJobAndWait(jobId, requestBody, submitTimeoutMs = 10_000) {
+  const baseUrl = inferUrl('/v1/jobs');
+  if (!baseUrl) {
+    return {
+      accepted: false,
+      errorMessage: 'infer service not configured',
+      submitStatus: 0,
+    };
+  }
+
+  const response = await inferFetchJson(baseUrl, {
+    method: 'POST',
+    body: requestBody,
+    timeoutMs: submitTimeoutMs,
+  });
+
+  if (response.ok || response.status === 409) {
+    if (response.status === 409) {
+      const visibility = await awaitInferJobVisibility(jobId, {
+        attempts: 3,
+        intervalMs: 500,
+        timeoutMs: 1500,
+      });
+      return {
+        accepted: true,
+        status: visibility.visible ? visibility.status : 'running',
+        submitStatus: response.status,
+        submitDurationMs: response.durationMs || 0,
+        responseBodySnippet: response.textSnippet || null,
+        visibility,
+      };
+    }
+
+    return {
+      accepted: true,
+      status: 'pending',
+      submitStatus: response.status,
+      submitDurationMs: response.durationMs || 0,
+      responseBodySnippet: response.textSnippet || null,
+    };
+  }
+
+  const visibility = await awaitInferJobVisibility(jobId, {
+    attempts: 8,
+    intervalMs: 1000,
+    timeoutMs: 1500,
+  });
+
+  if (visibility.visible) {
+    return {
+      accepted: true,
+      status: visibility.status,
+      submitStatus: response.status,
+      submitDurationMs: response.durationMs || 0,
+      responseBodySnippet: response.textSnippet || null,
+      visibility,
+      recoveredAfterSubmitFailure: true,
+    };
+  }
+
+  return {
+    accepted: false,
+    errorMessage:
+      response.json?.message ||
+      response.json?.error ||
+      response.error?.message ||
+      visibility.errorMessage ||
+      'infer service unavailable',
+    submitStatus: response.status,
+    submitDurationMs: response.durationMs || 0,
+    responseBodySnippet: response.textSnippet || null,
+    visibility,
+  };
 }
 
 async function requestUploadMetaGeneration({
@@ -981,7 +1126,11 @@ async function analyzeAndStoreUploadedShot(file, body) {
     track_frames: toNumberOrUndefined(body.track_frames),
     sourceType,
   };
-  let effectiveMetaPath = resolveMetaPath(body.metaPath, jobId);
+  const explicitMetaPath =
+    typeof body.metaPath === 'string' && body.metaPath.trim().length > 0
+      ? resolveMetaPath(body.metaPath, jobId)
+      : null;
+  let effectiveMetaPath = explicitMetaPath;
   let progress = buildAnalysisProgress('upload_received', { metaPath: effectiveMetaPath });
   const createPendingShot = (patch = {}) => {
     const shot = {
@@ -1013,52 +1162,77 @@ async function analyzeAndStoreUploadedShot(file, body) {
 
   createPendingShot();
 
-  if (effectiveMetaPath) {
+  if (explicitMetaPath) {
     updateProgress('meta_ready');
     createPendingShot();
     const metaReady = await waitForFile(effectiveMetaPath, 2000);
     if (metaReady) {
-      const baseUrl = inferUrl('/v1/jobs');
-      if (baseUrl) {
-        updateProgress('infer_submitting', { analysisPath: 'infer' });
+      updateProgress('infer_submitting', { analysisPath: 'infer' });
+      mergeAnalysisCache(jobId, {
+        status: 'pending',
+        analysis: null,
+        errorCode: null,
+        errorMessage: null,
+        metaPath: effectiveMetaPath,
+        progress,
+      });
+      const requestBody = {
+        mode: 'coach_from_meta',
+        jobId,
+        source: {
+          filename: file.filename,
+          videoPath: file.path,
+          metaPath: effectiveMetaPath,
+        },
+        options: { force: Boolean(force) },
+      };
+      const submitResult = await submitInferJobAndWait(jobId, requestBody);
+      if (submitResult.accepted) {
+        updateProgress(
+          submitResult.status === 'done'
+            ? 'infer_succeeded'
+            : submitResult.status === 'running'
+            ? 'infer_running'
+            : 'infer_pending',
+          {
+            analysisPath: 'infer',
+            detail: {
+              submitStatus: submitResult.submitStatus,
+              submitDurationMs: submitResult.submitDurationMs || 0,
+              responseBodySnippet: submitResult.responseBodySnippet || null,
+              recoveredAfterSubmitFailure: submitResult.recoveredAfterSubmitFailure === true,
+              visibilityStatus: submitResult.visibility?.lastStatus ?? 0,
+              visibilityAttempts: submitResult.visibility?.attemptsUsed ?? 0,
+            },
+          },
+        );
         mergeAnalysisCache(jobId, {
-          status: 'pending',
+          status:
+            submitResult.status === 'done'
+              ? 'done'
+              : submitResult.status === 'running'
+              ? 'running'
+              : 'pending',
           analysis: null,
           errorCode: null,
           errorMessage: null,
           metaPath: effectiveMetaPath,
           progress,
         });
-        const requestBody = {
-          mode: 'coach_from_meta',
-          jobId,
-          source: {
-            filename: file.filename,
-            videoPath: file.path,
-            metaPath: effectiveMetaPath,
-          },
-          options: { force: Boolean(force) },
-        };
-        const response = await inferFetchJson(baseUrl, {
-          method: 'POST',
-          body: requestBody,
-          timeoutMs: 2500,
-        });
-        if (response.ok || response.status === 409) {
-          updateProgress(response.status === 409 ? 'infer_running' : 'infer_pending', {
-            analysisPath: 'infer',
-          });
-          mergeAnalysisCache(jobId, {
-            status: response.status === 409 ? 'running' : 'pending',
-            analysis: null,
-            errorCode: null,
-            errorMessage: null,
-            metaPath: effectiveMetaPath,
-            progress,
-          });
-          return createPendingShot();
-        }
+        return createPendingShot();
       }
+      updateProgress('failed', {
+        analysisPath: 'infer',
+        metaPath: effectiveMetaPath,
+        detail: {
+          reason: submitResult.errorMessage || 'infer submit failed',
+          submitStatus: submitResult.submitStatus,
+          submitDurationMs: submitResult.submitDurationMs || 0,
+          responseBodySnippet: submitResult.responseBodySnippet || null,
+          visibilityStatus: submitResult.visibility?.lastStatus ?? 0,
+          visibilityAttempts: submitResult.visibility?.attemptsUsed ?? 0,
+        },
+      });
     }
   }
 
@@ -1117,7 +1291,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
   updateProgress('video_ready');
   createPendingShot();
 
-  if (!effectiveMetaPath) {
+  if (!explicitMetaPath) {
     updateProgress('meta_generation_requested', {
       analysisPath: 'infer',
       detail: { source: 'camera:/api/meta/from-file' },
@@ -1133,53 +1307,87 @@ async function analyzeAndStoreUploadedShot(file, body) {
       effectiveMetaPath = resolveMetaPath(generatedMetaPath, jobId);
       updateProgress('meta_ready', { analysisPath: 'infer' });
       createPendingShot();
+    } else {
+      updateProgress('failed', {
+        analysisPath: 'infer',
+        message: '카메라 서버가 업로드 영상용 service7 메타를 생성하지 못했습니다.',
+        detail: {
+          source: 'camera:/api/meta/from-file',
+          generatedMetaPath: null,
+        },
+      });
     }
   }
 
   if (effectiveMetaPath) {
     const metaReady = await waitForFile(effectiveMetaPath, 2000);
     if (metaReady) {
-      const baseUrl = inferUrl('/v1/jobs');
-      if (baseUrl) {
-        updateProgress('infer_submitting', { analysisPath: 'infer' });
+      updateProgress('infer_submitting', { analysisPath: 'infer' });
+      mergeAnalysisCache(jobId, {
+        status: 'pending',
+        analysis: null,
+        errorCode: null,
+        errorMessage: null,
+        metaPath: effectiveMetaPath,
+        progress,
+      });
+      const requestBody = {
+        mode: 'coach_from_meta',
+        jobId,
+        source: {
+          filename: file.filename,
+          videoPath: prepared.path,
+          metaPath: effectiveMetaPath,
+        },
+        options: { force: Boolean(force) },
+      };
+      const submitResult = await submitInferJobAndWait(jobId, requestBody);
+      if (submitResult.accepted) {
+        updateProgress(
+          submitResult.status === 'done'
+            ? 'infer_succeeded'
+            : submitResult.status === 'running'
+            ? 'infer_running'
+            : 'infer_pending',
+          {
+            analysisPath: 'infer',
+            detail: {
+              submitStatus: submitResult.submitStatus,
+              submitDurationMs: submitResult.submitDurationMs || 0,
+              responseBodySnippet: submitResult.responseBodySnippet || null,
+              recoveredAfterSubmitFailure: submitResult.recoveredAfterSubmitFailure === true,
+              visibilityStatus: submitResult.visibility?.lastStatus ?? 0,
+              visibilityAttempts: submitResult.visibility?.attemptsUsed ?? 0,
+            },
+          },
+        );
         mergeAnalysisCache(jobId, {
-          status: 'pending',
+          status:
+            submitResult.status === 'done'
+              ? 'done'
+              : submitResult.status === 'running'
+              ? 'running'
+              : 'pending',
           analysis: null,
           errorCode: null,
           errorMessage: null,
           metaPath: effectiveMetaPath,
           progress,
         });
-        const requestBody = {
-          mode: 'coach_from_meta',
-          jobId,
-          source: {
-            filename: file.filename,
-            videoPath: prepared.path,
-            metaPath: effectiveMetaPath,
-          },
-          options: { force: Boolean(force) },
-        };
-        const response = await inferFetchJson(baseUrl, {
-          method: 'POST',
-          body: requestBody,
-          timeoutMs: 2500,
-        });
-        if (response.ok || response.status === 409) {
-          updateProgress(response.status === 409 ? 'infer_running' : 'infer_pending', {
-            analysisPath: 'infer',
-          });
-          mergeAnalysisCache(jobId, {
-            status: response.status === 409 ? 'running' : 'pending',
-            analysis: null,
-            errorCode: null,
-            errorMessage: null,
-            metaPath: effectiveMetaPath,
-            progress,
-          });
-          return createPendingShot();
-        }
+        return createPendingShot();
       }
+      updateProgress('failed', {
+        analysisPath: 'infer',
+        metaPath: effectiveMetaPath,
+        detail: {
+          reason: submitResult.errorMessage || 'infer submit failed',
+          submitStatus: submitResult.submitStatus,
+          submitDurationMs: submitResult.submitDurationMs || 0,
+          responseBodySnippet: submitResult.responseBodySnippet || null,
+          visibilityStatus: submitResult.visibility?.lastStatus ?? 0,
+          visibilityAttempts: submitResult.visibility?.attemptsUsed ?? 0,
+        },
+      });
     }
   }
 
@@ -1188,11 +1396,13 @@ async function analyzeAndStoreUploadedShot(file, body) {
     : 'service7 infer job could not be submitted';
   const inferFailureMessage =
     '업로드 분석이 service7 추론 단계에 도달하지 못했습니다. OpenCV fallback은 현재 비활성화되어 있습니다.';
+  const previousDetail = progress?.detail && typeof progress.detail === 'object' ? progress.detail : {};
   updateProgress('failed', {
     analysisPath: effectiveMetaPath ? 'infer' : 'pending',
     metaPath: effectiveMetaPath,
     message: inferFailureMessage,
     detail: {
+      ...previousDetail,
       reason: inferFailureReason,
       converted: Boolean(prepared.converted),
       conversion: prepared.conversion || null,
@@ -1472,15 +1682,21 @@ app.post('/api/analyze/from-file', async (req, res) => {
     metaPath: resolvedMetaPath,
     progress,
   });
-  const response = await inferFetchJson(baseUrl, { method: 'POST', body: requestBody, timeoutMs: 2500 });
-  if (!response.ok && response.status !== 409) {
-    const errorMessage =
-      response.json?.message || response.json?.error || 'infer service unavailable';
+  const submitResult = await submitInferJobAndWait(providedJobId, requestBody);
+  if (!submitResult.accepted) {
+    const errorMessage = submitResult.errorMessage || 'infer service unavailable';
     const analysis = buildInferErrorAnalysis(providedJobId, errorMessage);
     progress = buildAnalysisProgress('failed', {
       analysisPath: 'infer',
       metaPath: resolvedMetaPath,
       message: errorMessage,
+      detail: {
+        submitStatus: submitResult.submitStatus,
+        submitDurationMs: submitResult.submitDurationMs || 0,
+        responseBodySnippet: submitResult.responseBodySnippet || null,
+        visibilityStatus: submitResult.visibility?.lastStatus ?? 0,
+        visibilityAttempts: submitResult.visibility?.attemptsUsed ?? 0,
+      },
     });
     writeAnalysisCache(providedJobId, {
       status: 'failed',
@@ -1500,45 +1716,49 @@ app.post('/api/analyze/from-file', async (req, res) => {
     });
   }
 
-  if (response.status === 409) {
-    const statusUrl = inferUrl(`/v1/jobs/${encodeURIComponent(providedJobId)}`);
-    if (statusUrl) {
-      const statusRes = await inferFetchJson(statusUrl, { timeoutMs: 1500 });
-      if (statusRes.ok) {
-        const mappedStatus = mapInferStatus(statusRes.json?.status || statusRes.json?.state);
-        progress = buildAnalysisProgress(
-          mappedStatus === 'done' ? 'infer_succeeded' : mappedStatus === 'failed' ? 'failed' : 'infer_running',
-          {
-            analysisPath: 'infer',
-            metaPath: resolvedMetaPath,
-          },
-        );
-        writeAnalysisCache(providedJobId, {
-          status: mappedStatus,
-          analysis: readAnalysisCache(providedJobId)?.analysis || null,
-          errorCode: null,
-          errorMessage: null,
-          metaPath: resolvedMetaPath,
-          progress,
-        });
-        return res.json({ ok: true, jobId: providedJobId, status: mappedStatus, progress });
-      }
-    }
-  }
-
-  progress = buildAnalysisProgress('infer_pending', {
-    analysisPath: 'infer',
-    metaPath: resolvedMetaPath,
-  });
+  progress = buildAnalysisProgress(
+    submitResult.status === 'done'
+      ? 'infer_succeeded'
+      : submitResult.status === 'running'
+      ? 'infer_running'
+      : 'infer_pending',
+    {
+      analysisPath: 'infer',
+      metaPath: resolvedMetaPath,
+      detail: {
+        submitStatus: submitResult.submitStatus,
+        submitDurationMs: submitResult.submitDurationMs || 0,
+        responseBodySnippet: submitResult.responseBodySnippet || null,
+        recoveredAfterSubmitFailure: submitResult.recoveredAfterSubmitFailure === true,
+        visibilityStatus: submitResult.visibility?.lastStatus ?? 0,
+        visibilityAttempts: submitResult.visibility?.attemptsUsed ?? 0,
+      },
+    },
+  );
   writeAnalysisCache(providedJobId, {
-    status: 'pending',
+    status:
+      submitResult.status === 'done'
+        ? 'done'
+        : submitResult.status === 'running'
+        ? 'running'
+        : 'pending',
     analysis: null,
     errorCode: null,
     errorMessage: null,
     metaPath: resolvedMetaPath,
     progress,
   });
-  return res.json({ ok: true, jobId: providedJobId, status: 'queued', progress });
+  return res.json({
+    ok: true,
+    jobId: providedJobId,
+    status:
+      submitResult.status === 'done'
+        ? 'done'
+        : submitResult.status === 'running'
+        ? 'running'
+        : 'queued',
+    progress,
+  });
 });
 
 async function fetchInferJobPayload(jobId, { includeResult } = {}) {
