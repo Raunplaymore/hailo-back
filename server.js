@@ -336,6 +336,7 @@ function buildAnalysisFromFrames(frameSeq) {
 
 function buildJobAnalysisPayload(shot) {
   const analysis = shot.analysis || {};
+  const progress = analysis.progress || shot.progress || null;
   const swing = analysis.swing || {};
   const ball = analysis.ballFlight || analysis.impact || {};
   const swingPlane = analysis.swing_plane || analysis.swingPlane || null;
@@ -408,6 +409,7 @@ function buildJobAnalysisPayload(shot) {
     confidence: Number.isFinite(confidence) ? confidence : null,
     errorMessage: analysis?.errorMessage,
     meta: analysis?.meta,
+    progress,
   };
 }
 
@@ -422,6 +424,7 @@ function mapShotToFileEntry(shot) {
     sourceType: shot.sourceType || 'upload',
     videoUrl: uploadsUrl(shot.media?.filename),
     analysis,
+    progress: analysis?.progress || shot.progress || null,
   };
 }
 
@@ -536,6 +539,101 @@ function readAnalysisCache(jobId) {
   }
 }
 
+const PROGRESS_STAGE_META = {
+  upload_received: {
+    label: '업로드 완료',
+    message: '파일이 서버에 등록되었습니다.',
+    analysisPath: 'pending',
+  },
+  video_preparing: {
+    label: '영상 준비',
+    message: '분석 가능한 형식으로 영상을 준비합니다.',
+    analysisPath: 'pending',
+  },
+  video_ready: {
+    label: '영상 준비 완료',
+    message: '분석 입력 영상 준비가 끝났습니다.',
+    analysisPath: 'pending',
+  },
+  meta_generation_requested: {
+    label: '메타 생성 요청',
+    message: '카메라 서버에 service7 메타 생성을 요청했습니다.',
+    analysisPath: 'infer',
+  },
+  meta_ready: {
+    label: '메타 준비 완료',
+    message: 'service7 추론용 메타 파일이 준비되었습니다.',
+    analysisPath: 'infer',
+  },
+  infer_submitting: {
+    label: '추론 제출',
+    message: 'hailo-infer에 service7 분석 작업을 제출합니다.',
+    analysisPath: 'infer',
+  },
+  infer_pending: {
+    label: '추론 대기',
+    message: 'service7 추론 작업이 대기열에 등록되었습니다.',
+    analysisPath: 'infer',
+  },
+  infer_running: {
+    label: '추론 실행',
+    message: 'service7 추론이 진행 중입니다.',
+    analysisPath: 'infer',
+  },
+  infer_succeeded: {
+    label: '추론 완료',
+    message: 'service7 추론 결과를 수집했습니다.',
+    analysisPath: 'infer',
+  },
+  fallback_opencv: {
+    label: '대체 분석 전환',
+    message: 'service7 경로를 사용하지 못해 OpenCV 분석으로 전환합니다.',
+    analysisPath: 'opencv',
+  },
+  opencv_precheck: {
+    label: '스윙 사전 확인',
+    message: 'OpenCV 분석 전 스윙 후보 여부를 확인합니다.',
+    analysisPath: 'opencv',
+  },
+  opencv_running: {
+    label: 'OpenCV 분석 실행',
+    message: 'OpenCV 기반 스윙 지표를 계산합니다.',
+    analysisPath: 'opencv',
+  },
+  opencv_succeeded: {
+    label: 'OpenCV 분석 완료',
+    message: 'OpenCV 기반 분석 결과를 정리했습니다.',
+    analysisPath: 'opencv',
+  },
+  failed: {
+    label: '분석 실패',
+    message: '분석 처리 중 오류가 발생했습니다.',
+    analysisPath: 'unknown',
+  },
+};
+
+function buildAnalysisProgress(stage, patch = {}) {
+  const defaults = PROGRESS_STAGE_META[stage] || {};
+  return {
+    stage,
+    stageLabel: patch.stageLabel || defaults.label || stage,
+    message: patch.message || defaults.message || null,
+    analysisPath: patch.analysisPath || defaults.analysisPath || 'unknown',
+    metaPath: patch.metaPath || null,
+    detail: patch.detail || null,
+  };
+}
+
+function mergeAnalysisCache(jobId, patch) {
+  const prev = readAnalysisCache(jobId) || {};
+  const next = {
+    ...prev,
+    ...patch,
+    progress: patch.progress ? patch.progress : prev.progress || null,
+  };
+  return writeAnalysisCache(jobId, next);
+}
+
 function writeAnalysisCache(jobId, cache) {
   const cachePath = analysisCachePath(jobId);
   if (!cachePath || !cache) return null;
@@ -636,6 +734,7 @@ function buildCoachAnalysisPayload(jobId, status, result) {
     coachSummary: result?.coachSummary ?? result?.coach_summary ?? [],
     confidence: result?.confidence ?? null,
     meta: result?.meta ?? null,
+    progress: result?.progress ?? null,
   };
 }
 
@@ -811,9 +910,15 @@ function buildQueuedUploadShot(file, body) {
 function markQueuedUploadShotFailed(file, errorMessage) {
   const existing = shotStore.getShotByMediaName(file.filename);
   if (!existing) return;
+  const progress = buildAnalysisProgress('failed', {
+    analysisPath: existing?.progress?.analysisPath || 'unknown',
+    metaPath: existing?.metadata?.metaPath || null,
+    message: errorMessage || PROGRESS_STAGE_META.failed.message,
+  });
   shotStore.upsertShot({
     ...existing,
     status: 'failed',
+    progress,
     analysis: {
       analysisVersion: existing.analysis?.analysisVersion || opencvAnalyzer.ANALYSIS_VERSION,
       errorCode: 'UPLOAD_ANALYSIS_FAILED',
@@ -825,6 +930,12 @@ function markQueuedUploadShotFailed(file, errorMessage) {
       coach_summary: [`analysis failed: ${errorMessage}`],
       analysis_id: randomUUID(),
     },
+  });
+  mergeAnalysisCache(existing.jobId, {
+    status: 'failed',
+    errorCode: 'UPLOAD_ANALYSIS_FAILED',
+    errorMessage,
+    progress,
   });
 }
 
@@ -871,6 +982,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
     sourceType,
   };
   let effectiveMetaPath = resolveMetaPath(body.metaPath, jobId);
+  let progress = buildAnalysisProgress('upload_received', { metaPath: effectiveMetaPath });
   const createPendingShot = (patch = {}) => {
     const shot = {
       id: shotId,
@@ -886,18 +998,37 @@ async function analyzeAndStoreUploadedShot(file, body) {
       },
       metadata: { ...meta, metaPath: effectiveMetaPath || undefined, ...patch.metadata },
       analysis: patch.analysis ?? existing?.analysis ?? null,
+      progress: patch.progress || progress,
     };
     shotStore.upsertShot(shot);
     return shot;
+  };
+  const updateProgress = (stage, patch = {}) => {
+    progress = buildAnalysisProgress(stage, {
+      metaPath: effectiveMetaPath,
+      ...patch,
+    });
+    return progress;
   };
 
   createPendingShot();
 
   if (effectiveMetaPath) {
+    updateProgress('meta_ready');
+    createPendingShot();
     const metaReady = await waitForFile(effectiveMetaPath, 2000);
     if (metaReady) {
       const baseUrl = inferUrl('/v1/jobs');
       if (baseUrl) {
+        updateProgress('infer_submitting', { analysisPath: 'infer' });
+        mergeAnalysisCache(jobId, {
+          status: 'pending',
+          analysis: null,
+          errorCode: null,
+          errorMessage: null,
+          metaPath: effectiveMetaPath,
+          progress,
+        });
         const requestBody = {
           mode: 'coach_from_meta',
           jobId,
@@ -914,14 +1045,31 @@ async function analyzeAndStoreUploadedShot(file, body) {
           timeoutMs: 2500,
         });
         if (response.ok || response.status === 409) {
+          updateProgress(response.status === 409 ? 'infer_running' : 'infer_pending', {
+            analysisPath: 'infer',
+          });
+          mergeAnalysisCache(jobId, {
+            status: response.status === 409 ? 'running' : 'pending',
+            analysis: null,
+            errorCode: null,
+            errorMessage: null,
+            metaPath: effectiveMetaPath,
+            progress,
+          });
           return createPendingShot();
         }
       }
     }
   }
 
+  updateProgress('video_preparing');
+  createPendingShot();
   const prepared = await prepareVideoForAnalysis(file.path, file.filename);
   if (prepared.ok === false) {
+    updateProgress('failed', {
+      analysisPath: 'opencv',
+      message: `영상 디코딩/변환에 실패했습니다. (${prepared.error})`,
+    });
     const analysis = {
       analysisVersion: opencvAnalyzer.ANALYSIS_VERSION,
       errorCode: 'DECODE_FAILED',
@@ -952,12 +1100,29 @@ async function analyzeAndStoreUploadedShot(file, body) {
       },
       metadata: { ...meta, metaPath: effectiveMetaPath || undefined },
       analysis,
+      progress,
     };
     shotStore.upsertShot(shot);
+    mergeAnalysisCache(jobId, {
+      status: 'failed',
+      analysis: buildJobAnalysisPayload(shot),
+      errorCode: analysis.errorCode,
+      errorMessage: analysis.errorMessage,
+      metaPath: effectiveMetaPath,
+      progress,
+    });
     return shot;
   }
 
+  updateProgress('video_ready');
+  createPendingShot();
+
   if (!effectiveMetaPath) {
+    updateProgress('meta_generation_requested', {
+      analysisPath: 'infer',
+      detail: { source: 'camera:/api/meta/from-file' },
+    });
+    createPendingShot();
     const generatedMetaPath = await requestUploadMetaGeneration({
       jobId,
       filename: file.filename,
@@ -966,6 +1131,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
     });
     if (generatedMetaPath) {
       effectiveMetaPath = resolveMetaPath(generatedMetaPath, jobId);
+      updateProgress('meta_ready', { analysisPath: 'infer' });
       createPendingShot();
     }
   }
@@ -975,6 +1141,15 @@ async function analyzeAndStoreUploadedShot(file, body) {
     if (metaReady) {
       const baseUrl = inferUrl('/v1/jobs');
       if (baseUrl) {
+        updateProgress('infer_submitting', { analysisPath: 'infer' });
+        mergeAnalysisCache(jobId, {
+          status: 'pending',
+          analysis: null,
+          errorCode: null,
+          errorMessage: null,
+          metaPath: effectiveMetaPath,
+          progress,
+        });
         const requestBody = {
           mode: 'coach_from_meta',
           jobId,
@@ -991,77 +1166,54 @@ async function analyzeAndStoreUploadedShot(file, body) {
           timeoutMs: 2500,
         });
         if (response.ok || response.status === 409) {
+          updateProgress(response.status === 409 ? 'infer_running' : 'infer_pending', {
+            analysisPath: 'infer',
+          });
+          mergeAnalysisCache(jobId, {
+            status: response.status === 409 ? 'running' : 'pending',
+            analysis: null,
+            errorCode: null,
+            errorMessage: null,
+            metaPath: effectiveMetaPath,
+            progress,
+          });
           return createPendingShot();
         }
       }
     }
   }
 
-  const videoMeta = await getVideoMeta(prepared.path);
-  const frameSeq = buildFrameSequenceFromFile(prepared.path, {
-    ...meta,
-    analysisInput: {
-      path: prepared.path,
+  const inferFailureReason = !effectiveMetaPath
+    ? 'service7 meta path was not created for upload analysis'
+    : 'service7 infer job could not be submitted';
+  const inferFailureMessage =
+    '업로드 분석이 service7 추론 단계에 도달하지 못했습니다. OpenCV fallback은 현재 비활성화되어 있습니다.';
+  updateProgress('failed', {
+    analysisPath: effectiveMetaPath ? 'infer' : 'pending',
+    metaPath: effectiveMetaPath,
+    message: inferFailureMessage,
+    detail: {
+      reason: inferFailureReason,
       converted: Boolean(prepared.converted),
-      conversion: prepared.conversion,
-      warning: prepared.warning,
+      conversion: prepared.conversion || null,
+      warning: prepared.warning || null,
     },
   });
-  let analysis;
-  let abortedByPrecheck = false;
-  let precheckResult;
-  if (!force) {
-    precheckResult = await precheckSwingCandidate(frameSeq, {
-      timeoutMs: 1200,
-      sampleWindowSec: 1.0,
-      sampleFrames: 8,
-      minDurationSec: 0.6,
-      minFrames: 20,
-      motionThreshold: 0.35,
-      resizeWidth: 160,
-    });
-    if (precheckResult?.ok === true && precheckResult?.isSwing === false) {
-      abortedByPrecheck = true;
-      analysis = buildNotSwingAnalysis({
-        ...precheckResult,
-        conversion: prepared.converted ? { converted: true, conversion: prepared.conversion } : null,
-      });
-    }
-  }
-  if (!abortedByPrecheck) {
-    const analyzed = await opencvAnalyzer.analyze(frameSeq);
-    const formatted = formatAnalysisForFrontend(analyzed.raw);
-    analysis = {
-      ...formatted,
-      analysisVersion: opencvAnalyzer.ANALYSIS_VERSION,
-      meta: {
-        fps: videoMeta.fps ?? meta.fps,
-        width: videoMeta.width,
-        height: videoMeta.height,
-        durationMs: videoMeta.durationMs,
-      },
-      analysisDurationMs: analyzed.durationMs,
-    };
-    if (prepared.converted) {
-      analysis.events = analysis.events || {};
-      analysis.events.conversion = {
-        converted: true,
-        conversion: prepared.conversion,
-        warning: prepared.warning,
-      };
-    }
-    if (analysis && !analysis.errorCode && isDecodeErrorMessage(analysis.errorMessage)) {
-      analysis.errorCode = 'DECODE_FAILED';
-    }
-  }
 
-  const failed = looksLikeAnalysisFailure(analysis) || !analysis;
-  const status = failed ? 'failed' : 'succeeded';
+  const analysis = buildInferErrorAnalysis(jobId, inferFailureMessage);
+  analysis.errorCode = 'INFER_PIPELINE_UNREACHED';
+  analysis.analysisVersion = 'infer-only';
+  analysis.progress = progress;
+  analysis.meta = {
+    converted: Boolean(prepared.converted),
+    conversion: prepared.conversion || null,
+    warning: prepared.warning || null,
+  };
 
   const shot = {
     id: shotId,
     jobId,
-    status,
+    status: 'failed',
     sessionId,
     sourceType,
     createdAt: existing?.createdAt || new Date().toISOString(),
@@ -1070,11 +1222,29 @@ async function analyzeAndStoreUploadedShot(file, body) {
       path: file.path,
       size: file.size,
     },
-    metadata: { ...meta, video: videoMeta, metaPath: effectiveMetaPath || undefined },
+    metadata: {
+      ...meta,
+      metaPath: effectiveMetaPath || undefined,
+      analysisInput: {
+        path: prepared.path,
+        converted: Boolean(prepared.converted),
+        conversion: prepared.conversion,
+        warning: prepared.warning,
+      },
+    },
     analysis,
+    progress,
   };
 
   shotStore.upsertShot(shot);
+  mergeAnalysisCache(jobId, {
+    status: 'failed',
+    analysis: buildJobAnalysisPayload(shot),
+    errorCode: analysis.errorCode,
+    errorMessage: analysis.errorMessage,
+    metaPath: effectiveMetaPath,
+    progress,
+  });
   return shot;
 }
 
@@ -1150,6 +1320,7 @@ app.post('/api/analyze', upload.single('video'), async (req, res) => {
       filename: req.file.filename,
       url: uploadsUrl(req.file.filename),
       status: shot.status,
+      progress: shot.progress || null,
     });
   } catch (err) {
     console.error('analyze job failed', err);
@@ -1201,6 +1372,10 @@ app.post('/api/analyze/from-file', async (req, res) => {
   if (!resolvedMetaPath) {
     return res.status(400).json({ ok: false, message: 'Invalid meta path' });
   }
+  let progress = buildAnalysisProgress('meta_ready', {
+    analysisPath: 'infer',
+    metaPath: resolvedMetaPath,
+  });
 
   const cached = readAnalysisCache(providedJobId);
   const cachedAgeMs = cached?.updatedAt ? Date.now() - Date.parse(cached.updatedAt) : Number.POSITIVE_INFINITY;
@@ -1209,19 +1384,31 @@ app.post('/api/analyze/from-file', async (req, res) => {
     cachedAgeMs < 30_000 &&
     (cached.status === 'pending' || cached.status === 'running');
   if (!force && cached?.status && (cached.status === 'done' || hasFreshInFlightCache)) {
-    return res.json({ ok: true, jobId: providedJobId, filename: targetFilename, status: cached.status });
+    return res.json({
+      ok: true,
+      jobId: providedJobId,
+      filename: targetFilename,
+      status: cached.status,
+      progress: cached.progress || progress,
+    });
   }
 
   const metaReady = await waitForFile(resolvedMetaPath, 2000);
   if (!metaReady) {
     const errorMessage = `meta file not found: ${resolvedMetaPath}`;
     const analysis = buildInferErrorAnalysis(providedJobId, errorMessage);
+    progress = buildAnalysisProgress('failed', {
+      analysisPath: 'infer',
+      metaPath: resolvedMetaPath,
+      message: errorMessage,
+    });
     writeAnalysisCache(providedJobId, {
       status: 'failed',
       analysis,
       errorCode: analysis.errorCode,
       errorMessage,
       metaPath: resolvedMetaPath,
+      progress,
     });
     return res.json({
       ok: true,
@@ -1230,6 +1417,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
       status: 'failed',
       errorCode: analysis.errorCode,
       errorMessage,
+      progress,
     });
   }
 
@@ -1237,12 +1425,18 @@ app.post('/api/analyze/from-file', async (req, res) => {
   if (!baseUrl) {
     const errorMessage = 'infer service not configured';
     const analysis = buildInferErrorAnalysis(providedJobId, errorMessage);
+    progress = buildAnalysisProgress('failed', {
+      analysisPath: 'infer',
+      metaPath: resolvedMetaPath,
+      message: errorMessage,
+    });
     writeAnalysisCache(providedJobId, {
       status: 'failed',
       analysis,
       errorCode: analysis.errorCode,
       errorMessage,
       metaPath: resolvedMetaPath,
+      progress,
     });
     return res.json({
       ok: true,
@@ -1250,6 +1444,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
       status: 'failed',
       errorCode: analysis.errorCode,
       errorMessage,
+      progress,
     });
   }
 
@@ -1265,17 +1460,35 @@ app.post('/api/analyze/from-file', async (req, res) => {
     options: { force: Boolean(force) },
   };
 
+  progress = buildAnalysisProgress('infer_submitting', {
+    analysisPath: 'infer',
+    metaPath: resolvedMetaPath,
+  });
+  mergeAnalysisCache(providedJobId, {
+    status: 'pending',
+    analysis: cached?.analysis || null,
+    errorCode: null,
+    errorMessage: null,
+    metaPath: resolvedMetaPath,
+    progress,
+  });
   const response = await inferFetchJson(baseUrl, { method: 'POST', body: requestBody, timeoutMs: 2500 });
   if (!response.ok && response.status !== 409) {
     const errorMessage =
       response.json?.message || response.json?.error || 'infer service unavailable';
     const analysis = buildInferErrorAnalysis(providedJobId, errorMessage);
+    progress = buildAnalysisProgress('failed', {
+      analysisPath: 'infer',
+      metaPath: resolvedMetaPath,
+      message: errorMessage,
+    });
     writeAnalysisCache(providedJobId, {
       status: 'failed',
       analysis,
       errorCode: analysis.errorCode,
       errorMessage,
       metaPath: resolvedMetaPath,
+      progress,
     });
     return res.json({
       ok: true,
@@ -1283,6 +1496,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
       status: 'failed',
       errorCode: analysis.errorCode,
       errorMessage,
+      progress,
     });
   }
 
@@ -1292,71 +1506,102 @@ app.post('/api/analyze/from-file', async (req, res) => {
       const statusRes = await inferFetchJson(statusUrl, { timeoutMs: 1500 });
       if (statusRes.ok) {
         const mappedStatus = mapInferStatus(statusRes.json?.status || statusRes.json?.state);
+        progress = buildAnalysisProgress(
+          mappedStatus === 'done' ? 'infer_succeeded' : mappedStatus === 'failed' ? 'failed' : 'infer_running',
+          {
+            analysisPath: 'infer',
+            metaPath: resolvedMetaPath,
+          },
+        );
         writeAnalysisCache(providedJobId, {
           status: mappedStatus,
           analysis: readAnalysisCache(providedJobId)?.analysis || null,
           errorCode: null,
           errorMessage: null,
           metaPath: resolvedMetaPath,
+          progress,
         });
-        return res.json({ ok: true, jobId: providedJobId, status: mappedStatus });
+        return res.json({ ok: true, jobId: providedJobId, status: mappedStatus, progress });
       }
     }
   }
 
+  progress = buildAnalysisProgress('infer_pending', {
+    analysisPath: 'infer',
+    metaPath: resolvedMetaPath,
+  });
   writeAnalysisCache(providedJobId, {
     status: 'pending',
     analysis: null,
     errorCode: null,
     errorMessage: null,
     metaPath: resolvedMetaPath,
+    progress,
   });
-  return res.json({ ok: true, jobId: providedJobId, status: 'queued' });
+  return res.json({ ok: true, jobId: providedJobId, status: 'queued', progress });
 });
 
 async function fetchInferJobPayload(jobId, { includeResult } = {}) {
   const cached = readAnalysisCache(jobId);
   const cachedStatus = cached?.status;
   const cachedAnalysis = cached?.analysis || null;
+  const cachedProgress = cached?.progress || null;
 
   const statusUrl = inferUrl(`/v1/jobs/${encodeURIComponent(jobId)}`);
   if (!statusUrl) {
     if (cached) {
-      return { status: cachedStatus || 'failed', analysis: cachedAnalysis };
+      return { status: cachedStatus || 'failed', analysis: cachedAnalysis, progress: cachedProgress };
     }
     const analysis = buildInferErrorAnalysis(jobId, 'infer service not configured');
+    const progress = buildAnalysisProgress('failed', {
+      analysisPath: 'infer',
+      message: 'infer service not configured',
+    });
     writeAnalysisCache(jobId, {
       status: 'failed',
       analysis,
       errorCode: analysis.errorCode,
       errorMessage: analysis.errorMessage,
+      progress,
     });
-    return { status: 'failed', analysis };
+    return { status: 'failed', analysis, progress };
   }
 
   const statusRes = await inferFetchJson(statusUrl, { timeoutMs: 1500 });
   if (!statusRes.ok) {
     if (statusRes.status === 404) {
       if (cached) {
-        return { status: cachedStatus || 'done', analysis: cachedAnalysis };
+        return { status: cachedStatus || 'done', analysis: cachedAnalysis, progress: cachedProgress };
       }
       return { notFound: true };
     }
     if (cached) {
-      return { status: cachedStatus || 'failed', analysis: cachedAnalysis };
+      return { status: cachedStatus || 'failed', analysis: cachedAnalysis, progress: cachedProgress };
     }
     const analysis = buildInferErrorAnalysis(jobId, 'infer service unavailable');
+    const progress = buildAnalysisProgress('failed', {
+      analysisPath: 'infer',
+      message: 'infer service unavailable',
+    });
     writeAnalysisCache(jobId, {
       status: 'failed',
       analysis,
       errorCode: analysis.errorCode,
       errorMessage: analysis.errorMessage,
+      progress,
     });
-    return { status: 'failed', analysis };
+    return { status: 'failed', analysis, progress };
   }
 
   const mappedStatus = mapInferStatus(statusRes.json?.status || statusRes.json?.state);
   let analysis = cachedAnalysis;
+  let progress = buildAnalysisProgress(
+    mappedStatus === 'done' ? 'infer_succeeded' : mappedStatus === 'failed' ? 'failed' : mappedStatus === 'running' ? 'infer_running' : 'infer_pending',
+    {
+      analysisPath: 'infer',
+      metaPath: cached?.metaPath || null,
+    },
+  );
 
   if (mappedStatus === 'done' || mappedStatus === 'failed') {
     const resultUrl = inferUrl(`/v1/jobs/${encodeURIComponent(jobId)}/result`);
@@ -1364,15 +1609,26 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
       const resultRes = await inferFetchJson(resultUrl, { timeoutMs: 3000 });
       if (resultRes.ok) {
         analysis = normalizeInferResult(jobId, mappedStatus, resultRes.json);
+        progress = buildAnalysisProgress(mappedStatus === 'done' ? 'infer_succeeded' : 'failed', {
+          analysisPath: 'infer',
+          metaPath: cached?.metaPath || null,
+          message: mappedStatus === 'failed' ? analysis?.errorMessage || PROGRESS_STAGE_META.failed.message : undefined,
+        });
       } else if (!analysis) {
         const errorAnalysis = buildInferErrorAnalysis(jobId, 'infer result unavailable');
+        progress = buildAnalysisProgress('failed', {
+          analysisPath: 'infer',
+          metaPath: cached?.metaPath || null,
+          message: 'infer result unavailable',
+        });
         writeAnalysisCache(jobId, {
           status: 'failed',
           analysis: errorAnalysis,
           errorCode: errorAnalysis.errorCode,
           errorMessage: errorAnalysis.errorMessage,
+          progress,
         });
-        return { status: 'failed', analysis: errorAnalysis };
+        return { status: 'failed', analysis: errorAnalysis, progress };
       }
     }
   } else if (includeResult) {
@@ -1381,8 +1637,9 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
       analysis,
       errorCode: analysis?.errorCode ?? null,
       errorMessage: analysis?.errorMessage ?? null,
+      progress,
     });
-    return { status: mappedStatus, analysis };
+    return { status: mappedStatus, analysis, progress };
   }
 
   writeAnalysisCache(jobId, {
@@ -1390,8 +1647,9 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
     analysis,
     errorCode: analysis?.errorCode ?? null,
     errorMessage: analysis?.errorMessage ?? null,
+    progress,
   });
-  return { status: mappedStatus, analysis };
+  return { status: mappedStatus, analysis, progress };
 }
 
 function buildShotJobResponse(jobId) {
@@ -1403,6 +1661,7 @@ function buildShotJobResponse(jobId) {
     jobId,
     status: shot.status || analysis.status || 'succeeded',
     analysis,
+    progress: analysis?.progress || shot.progress || null,
     errorCode: analysis?.errorCode ?? null,
     errorMessage: analysis?.errorMessage ?? null,
   };
@@ -1417,6 +1676,7 @@ async function respondJobStatus(req, res) {
       jobId,
       status: inferPayload.status,
       analysis: inferPayload.analysis || null,
+      progress: inferPayload.progress || inferPayload.analysis?.progress || null,
       errorCode: inferPayload.analysis?.errorCode ?? null,
       errorMessage: inferPayload.analysis?.errorMessage ?? null,
     });
@@ -1439,6 +1699,7 @@ async function respondJobResult(req, res) {
       jobId,
       status: inferPayload.status,
       analysis: inferPayload.analysis || null,
+      progress: inferPayload.progress || inferPayload.analysis?.progress || null,
       errorCode: inferPayload.analysis?.errorCode ?? null,
       errorMessage: inferPayload.analysis?.errorMessage ?? null,
     });
@@ -1535,6 +1796,7 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
       url: uploadsUrl(req.file.filename),
       originalName: req.file.originalname,
       shot,
+      progress: shot.progress || null,
     });
   } catch (err) {
     console.error('upload with analyze failed', err);
@@ -1609,6 +1871,7 @@ app.get('/api/files/detail', async (_req, res) => {
           size: stats?.size,
           modifiedAt: stats?.mtime?.toISOString(),
           analysis: shot ? buildJobAnalysisPayload(shot) : cachedAnalysis,
+          progress: shot?.progress || cached?.progress || null,
         };
       }),
     );
