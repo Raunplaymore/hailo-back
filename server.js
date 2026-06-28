@@ -750,12 +750,34 @@ function normalizeInferResult(jobId, status, result) {
     return normalizeInferResult(jobId, status, result.analysis);
   }
   if (isJobAnalysisPayload(result)) {
-    const mappedStatus = result.status === 'done' ? 'succeeded' : result.status === 'failed' ? 'failed' : result.status;
+    const mappedStatus =
+      status === 'done'
+        ? 'succeeded'
+        : status === 'failed'
+        ? 'failed'
+        : status === 'running'
+        ? 'running'
+        : result.status === 'done'
+        ? 'succeeded'
+        : result.status === 'failed'
+        ? 'failed'
+        : result.status;
     return {
-      ...result,
+      ok: result.ok !== false,
       jobId: result.jobId || jobId,
-      status: mappedStatus || (status === 'done' ? 'succeeded' : status === 'failed' ? 'failed' : 'running'),
+      status: mappedStatus || 'running',
+      analysisVersion: result.analysisVersion || result.analysis_version || 'coach-meta-v1',
+      errorCode: result.errorCode ?? null,
+      errorMessage: result.errorMessage ?? null,
+      events: result.events || {},
+      metrics: result.metrics || null,
+      summary: result.summary ?? null,
+      coachSummary: result.coachSummary ?? result.coach_summary ?? [],
+      confidence: result.confidence ?? null,
+      meta: result.meta ?? null,
+      debug: result.debug ?? null,
       pending: result.pending || DEFAULT_PENDING_ITEMS,
+      progress: null,
     };
   }
   if (result.swing || result.ballFlight || result.impact) {
