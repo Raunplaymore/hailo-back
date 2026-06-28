@@ -980,6 +980,7 @@ async function requestUploadMetaGeneration({
   inputPath,
   force,
   durationSec,
+  videoMeta,
 }) {
   const url = cameraUrl('/api/meta/from-file');
   if (!url || !jobId || !filename || !inputPath) return null;
@@ -992,6 +993,10 @@ async function requestUploadMetaGeneration({
       model: 'yolov8n_service7',
       force: Boolean(force),
       durationSec,
+      durationMs: videoMeta?.durationMs,
+      width: videoMeta?.width,
+      height: videoMeta?.height,
+      fps: videoMeta?.fps,
     },
     timeoutMs: 120_000,
   });
@@ -1291,6 +1296,8 @@ async function analyzeAndStoreUploadedShot(file, body) {
   updateProgress('video_ready');
   createPendingShot();
 
+  const preparedVideoMeta = await getVideoMeta(prepared.path);
+
   if (!explicitMetaPath) {
     updateProgress('meta_generation_requested', {
       analysisPath: 'infer',
@@ -1302,6 +1309,11 @@ async function analyzeAndStoreUploadedShot(file, body) {
       filename: file.filename,
       inputPath: prepared.path,
       force,
+      durationSec:
+        Number.isFinite(preparedVideoMeta?.durationMs) && preparedVideoMeta.durationMs > 0
+          ? preparedVideoMeta.durationMs / 1000
+          : undefined,
+      videoMeta: preparedVideoMeta,
     });
     if (generatedMetaPath) {
       effectiveMetaPath = resolveMetaPath(generatedMetaPath, jobId);
