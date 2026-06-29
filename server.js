@@ -665,10 +665,19 @@ function buildAnalysisProgress(stage, patch = {}) {
 
 function buildGroupedProgress(stage, patch = {}) {
   const baseDetail = patch.detail && typeof patch.detail === 'object' ? patch.detail : {};
+  const bodyPipeline = patch.bodyPath
+    ? 'available'
+    : baseDetail.bodySkipped === true
+      ? 'skipped'
+      : baseDetail.bodyReason || (Number.isFinite(baseDetail.bodyStatus) && baseDetail.bodyStatus > 0)
+        ? 'failed'
+        : bodyAnalyzerBaseUrl
+          ? 'configured'
+          : 'not-configured';
   return buildAnalysisProgress(stage, {
     ...patch,
     detail: {
-      bodyPipeline: patch.bodyPath ? 'available' : 'not-configured',
+      bodyPipeline,
       clubPipeline: 'service7-meta',
       fusionPipeline: patch.analysisPath === 'infer' ? 'hailo-infer' : 'unknown',
       ...baseDetail,
@@ -1346,6 +1355,10 @@ async function analyzeAndStoreUploadedShot(file, body) {
     progress = groupedStage ? buildGroupedProgress(stage, mergedPatch) : buildAnalysisProgress(stage, mergedPatch);
     return progress;
   };
+  const mergeProgressDetail = (detail = {}) => ({
+    ...(progress?.detail && typeof progress.detail === 'object' ? progress.detail : {}),
+    ...(detail && typeof detail === 'object' ? detail : {}),
+  });
 
   createPendingShot();
 
@@ -1490,7 +1503,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
     analysisPath: 'pending',
     metaPath: effectiveMetaPath,
     bodyPath: effectiveBodyPath,
-    detail: { source: 'body:/v1/body/from-video' },
+    detail: mergeProgressDetail({ source: 'body:/v1/body/from-video' }),
   });
   createPendingShot();
   const bodyResult = await requestBodyAnalysis({
@@ -1506,10 +1519,10 @@ async function analyzeAndStoreUploadedShot(file, body) {
       analysisPath: 'pending',
       metaPath: effectiveMetaPath,
       bodyPath: effectiveBodyPath,
-      detail: {
+      detail: mergeProgressDetail({
         source: 'body:/v1/body/from-video',
         bodyStatus: bodyResult.status || 200,
-      },
+      }),
     });
     createPendingShot();
   } else {
@@ -1517,13 +1530,13 @@ async function analyzeAndStoreUploadedShot(file, body) {
       analysisPath: 'pending',
       metaPath: effectiveMetaPath,
       bodyPath: effectiveBodyPath,
-      detail: {
+      detail: mergeProgressDetail({
         source: 'body:/v1/body/from-video',
         bodySkipped: bodyResult.skipped === true,
         bodyReason: bodyResult.reason || null,
         bodyStatus: bodyResult.status || 0,
         bodyResponseSnippet: bodyResult.textSnippet || null,
-      },
+      }),
     });
     createPendingShot();
   }
@@ -1533,7 +1546,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
       analysisPath: 'infer',
       metaPath: effectiveMetaPath,
       bodyPath: effectiveBodyPath,
-      detail: { source: 'camera:/api/meta/from-file' },
+      detail: mergeProgressDetail({ source: 'camera:/api/meta/from-file' }),
     });
     createPendingShot();
     const generatedMetaPath = await requestUploadMetaGeneration({
@@ -1603,14 +1616,14 @@ async function analyzeAndStoreUploadedShot(file, body) {
           bodyPath: effectiveBodyPath,
           clubPath: effectiveMetaPath,
           fusionPath: submitResult.status === 'done' ? analysisCachePath(jobId) : null,
-          detail: {
+          detail: mergeProgressDetail({
             submitStatus: submitResult.submitStatus,
             submitDurationMs: submitResult.submitDurationMs || 0,
             responseBodySnippet: submitResult.responseBodySnippet || null,
             recoveredAfterSubmitFailure: submitResult.recoveredAfterSubmitFailure === true,
             visibilityStatus: submitResult.visibility?.lastStatus ?? 0,
             visibilityAttempts: submitResult.visibility?.attemptsUsed ?? 0,
-          },
+          }),
         });
         mergeAnalysisCache(jobId, {
           status:
