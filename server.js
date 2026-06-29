@@ -2014,18 +2014,24 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
   const shot = shotStore.getShotByJobId(jobId);
   const shotProgress = shot?.progress || null;
   const shotMetadata = shot?.metadata || null;
+  const diskBodyPath = bodyArtifactPath(jobId);
+  const diskBodyExists = typeof diskBodyPath === 'string' && fs.existsSync(diskBodyPath);
   const cachedStatus = cached?.status;
   const cachedAnalysis = cached?.analysis || null;
   const cachedProgress = cached?.progress || null;
   const cachedMetaPath =
     cachedProgress?.metaPath || cached?.metaPath || shotProgress?.metaPath || shotMetadata?.metaPath || null;
   const cachedBodyPath =
-    cachedProgress?.bodyPath || shotProgress?.bodyPath || shotMetadata?.bodyPath || null;
+    cachedProgress?.bodyPath ||
+    shotProgress?.bodyPath ||
+    shotMetadata?.bodyPath ||
+    (diskBodyExists ? diskBodyPath : null);
   const cachedClubPath = cachedProgress?.clubPath || shotProgress?.clubPath || cachedMetaPath || null;
   const cachedFusionPath = cachedProgress?.fusionPath || shotProgress?.fusionPath || null;
   const cachedDetail = {
     ...(cachedProgress?.detail && typeof cachedProgress.detail === 'object' ? cachedProgress.detail : {}),
     ...(shotProgress?.detail && typeof shotProgress.detail === 'object' ? shotProgress.detail : {}),
+    ...(diskBodyExists ? { bodyRecoveredFromDisk: true } : {}),
   };
 
   const statusUrl = inferUrl(`/v1/jobs/${encodeURIComponent(jobId)}`);
