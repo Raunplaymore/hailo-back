@@ -529,6 +529,11 @@ function analysisCachePath(jobId) {
   return path.join(analysisCacheDir, `${jobId}.json`);
 }
 
+function bodyArtifactPath(jobId) {
+  if (!jobId) return null;
+  return path.join(dataDir, 'body', `${jobId}.json`);
+}
+
 function readAnalysisCache(jobId) {
   const cachePath = analysisCachePath(jobId);
   if (!cachePath) return null;
@@ -1131,7 +1136,21 @@ async function requestBodyAnalysis({
     timeoutMs: 15000,
   });
 
+  const fallbackBodyPath = bodyArtifactPath(jobId);
+  const fallbackBodyExists =
+    typeof fallbackBodyPath === 'string' && fs.existsSync(fallbackBodyPath);
+
   if (!response.ok) {
+    if (fallbackBodyExists) {
+      return {
+        ok: true,
+        bodyPath: fallbackBodyPath,
+        metrics: response.json?.metrics || null,
+        status: response.status,
+        textSnippet: response.textSnippet || null,
+        recoveredFromDisk: true,
+      };
+    }
     return {
       ok: false,
       skipped: false,
@@ -1150,10 +1169,11 @@ async function requestBodyAnalysis({
 
   return {
     ok: true,
-    bodyPath: response.json?.bodyPath || response.json?.path || null,
+    bodyPath: response.json?.bodyPath || response.json?.path || (fallbackBodyExists ? fallbackBodyPath : null),
     metrics: response.json?.metrics || null,
     status: response.status,
     textSnippet: response.textSnippet || null,
+    recoveredFromDisk: !response.json?.bodyPath && !response.json?.path && fallbackBodyExists,
   };
 }
 
