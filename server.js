@@ -1991,15 +1991,22 @@ app.post('/api/analyze/from-file', async (req, res) => {
 
 async function fetchInferJobPayload(jobId, { includeResult } = {}) {
   const cached = readAnalysisCache(jobId);
+  const shot = shotStore.getShotByJobId(jobId);
+  const shotProgress = shot?.progress || null;
+  const shotMetadata = shot?.metadata || null;
   const cachedStatus = cached?.status;
   const cachedAnalysis = cached?.analysis || null;
   const cachedProgress = cached?.progress || null;
-  const cachedMetaPath = cachedProgress?.metaPath || cached?.metaPath || null;
-  const cachedBodyPath = cachedProgress?.bodyPath || null;
-  const cachedClubPath = cachedProgress?.clubPath || cachedMetaPath || null;
-  const cachedFusionPath = cachedProgress?.fusionPath || null;
-  const cachedDetail =
-    cachedProgress?.detail && typeof cachedProgress.detail === 'object' ? cachedProgress.detail : {};
+  const cachedMetaPath =
+    cachedProgress?.metaPath || cached?.metaPath || shotProgress?.metaPath || shotMetadata?.metaPath || null;
+  const cachedBodyPath =
+    cachedProgress?.bodyPath || shotProgress?.bodyPath || shotMetadata?.bodyPath || null;
+  const cachedClubPath = cachedProgress?.clubPath || shotProgress?.clubPath || cachedMetaPath || null;
+  const cachedFusionPath = cachedProgress?.fusionPath || shotProgress?.fusionPath || null;
+  const cachedDetail = {
+    ...(cachedProgress?.detail && typeof cachedProgress.detail === 'object' ? cachedProgress.detail : {}),
+    ...(shotProgress?.detail && typeof shotProgress.detail === 'object' ? shotProgress.detail : {}),
+  };
 
   const statusUrl = inferUrl(`/v1/jobs/${encodeURIComponent(jobId)}`);
   if (!statusUrl) {
