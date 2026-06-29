@@ -16,6 +16,7 @@ module.exports = {
         DATA_DIR: path.join(repoDir, 'data'),
         META_DIR: '/tmp',
         INFER_BASE_URL: 'http://127.0.0.1:3002',
+        BODY_ANALYZER_BASE_URL: 'http://127.0.0.1:3002',
       },
       env_production: {
         NODE_ENV: 'production',
@@ -24,6 +25,7 @@ module.exports = {
         DATA_DIR: '/home/ray/data',
         META_DIR: '/tmp',
         INFER_BASE_URL: 'http://127.0.0.1:3002',
+        BODY_ANALYZER_BASE_URL: 'http://127.0.0.1:3002',
       },
       instances: 1,
       autorestart: true,

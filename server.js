@@ -26,6 +26,7 @@ const metaDir = process.env.META_DIR || '/tmp';
 const healthDir = path.join(__dirname, 'health');
 const inferBaseUrl = process.env.INFER_BASE_URL || 'http://127.0.0.1:3002';
 const cameraBaseUrl = process.env.CAMERA_BASE_URL || 'http://127.0.0.1:3001';
+const bodyAnalyzerBaseUrl = process.env.BODY_ANALYZER_BASE_URL || '';
 const analysisCacheDir = path.join(dataDir, 'analysis');
 
 // Ensure upload directory exists
@@ -555,6 +556,36 @@ const PROGRESS_STAGE_META = {
     message: '분석 입력 영상 준비가 끝났습니다.',
     analysisPath: 'pending',
   },
+  pose_running: {
+    label: '몸 분석 실행',
+    message: 'pose 기반 body track을 생성합니다.',
+    analysisPath: 'pending',
+  },
+  pose_ready: {
+    label: '몸 분석 완료',
+    message: 'body track 준비가 완료되었습니다.',
+    analysisPath: 'pending',
+  },
+  club_running: {
+    label: '클럽 분석 실행',
+    message: 'Hailo club track을 생성합니다.',
+    analysisPath: 'infer',
+  },
+  club_ready: {
+    label: '클럽 분석 완료',
+    message: 'club track 준비가 완료되었습니다.',
+    analysisPath: 'infer',
+  },
+  fusion_running: {
+    label: '융합 분석 실행',
+    message: 'body/club 데이터를 결합해 이벤트와 지표를 계산합니다.',
+    analysisPath: 'infer',
+  },
+  fusion_succeeded: {
+    label: '융합 분석 완료',
+    message: 'body/club 융합 분석 결과를 정리했습니다.',
+    analysisPath: 'infer',
+  },
   meta_generation_requested: {
     label: '메타 생성 요청',
     message: '카메라 서버에 service7 메타 생성을 요청했습니다.',
@@ -620,8 +651,24 @@ function buildAnalysisProgress(stage, patch = {}) {
     message: patch.message || defaults.message || null,
     analysisPath: patch.analysisPath || defaults.analysisPath || 'unknown',
     metaPath: patch.metaPath || null,
+    bodyPath: patch.bodyPath || null,
+    clubPath: patch.clubPath || null,
+    fusionPath: patch.fusionPath || null,
     detail: patch.detail || null,
   };
+}
+
+function buildGroupedProgress(stage, patch = {}) {
+  const baseDetail = patch.detail && typeof patch.detail === 'object' ? patch.detail : {};
+  return buildAnalysisProgress(stage, {
+    ...patch,
+    detail: {
+      bodyPipeline: patch.bodyPath ? 'available' : 'not-configured',
+      clubPipeline: 'service7-meta',
+      fusionPipeline: patch.analysisPath === 'infer' ? 'hailo-infer' : 'unknown',
+      ...baseDetail,
+    },
+  });
 }
 
 function mergeAnalysisCache(jobId, patch) {
@@ -671,6 +718,13 @@ function buildJobAnalysisPayloadFromAnalysis(jobId, status, analysis) {
 function buildCoachAnalysisPayload(jobId, status, result) {
   const tempo = result?.metrics?.tempo || {};
   const metrics = result?.metrics || {};
+  const asMetricPayload = (value, extra = {}) => {
+    if (!value || value === null) return null;
+    if (typeof value === 'string') return { label: value, ...extra };
+    if (typeof value === 'object') return { ...value, ...extra };
+    if (typeof value === 'number') return { label: String(value), ...extra };
+    return null;
+  };
   const impactMs =
     result?.events?.impactMs ??
     result?.events?.impact?.timeMs ??
@@ -693,6 +747,23 @@ function buildCoachAnalysisPayload(jobId, status, result) {
         ? tempo.ratio
         : `${tempo.ratio}:1`;
   const mappedStatus = status === 'done' ? 'succeeded' : status === 'failed' ? 'failed' : 'running';
+  const groupedClubMetrics = metrics.club ?? metrics.clubMetrics ?? {
+    swingPlane: asMetricPayload(metrics.swingPlaneDetail ?? metrics.swingPlane),
+    impactStability: asMetricPayload(metrics.impactStabilityDetail ?? metrics.impactStability),
+    shaftPlane: asMetricPayload(metrics.shaftPlane),
+    backswing: asMetricPayload(metrics.backswing),
+    readiness: asMetricPayload(metrics.readiness),
+    trackingQuality: asMetricPayload(metrics.trackingQuality),
+  };
+  const groupedFusionMetrics = metrics.fusion ?? metrics.fusionMetrics ?? {
+    tempo: asMetricPayload(metrics.tempo, {
+      label: ratioValue ? `tempo ${ratioValue}` : null,
+      comment: result?.summary ?? null,
+    }),
+    ball: asMetricPayload(metrics.ball, {
+      label: metrics?.ball?.launchDirection || 'unknown',
+    }),
+  };
   return {
     jobId,
     status: mappedStatus,
@@ -727,6 +798,9 @@ function buildCoachAnalysisPayload(jobId, status, result) {
       backswing: metrics.backswing ?? null,
       readiness: metrics.readiness ?? null,
       trackingQuality: metrics.trackingQuality ?? null,
+      body: metrics.body ?? metrics.bodyMetrics ?? null,
+      club: groupedClubMetrics,
+      fusion: groupedFusionMetrics,
     },
     pending: DEFAULT_PENDING_ITEMS,
     errorMessage: result?.errorMessage ?? null,
@@ -777,7 +851,7 @@ function normalizeInferResult(jobId, status, result) {
       meta: result.meta ?? null,
       debug: result.debug ?? null,
       pending: result.pending || DEFAULT_PENDING_ITEMS,
-      progress: null,
+      progress: result.progress ?? null,
     };
   }
   if (result.swing || result.ballFlight || result.impact) {
@@ -821,6 +895,12 @@ function inferUrl(pathname) {
 function cameraUrl(pathname) {
   if (!cameraBaseUrl) return null;
   const base = cameraBaseUrl.replace(/\/$/, '');
+  return `${base}${pathname}`;
+}
+
+function bodyUrl(pathname) {
+  if (!bodyAnalyzerBaseUrl) return null;
+  const base = bodyAnalyzerBaseUrl.replace(/\/$/, '');
   return `${base}${pathname}`;
 }
 
@@ -1027,6 +1107,56 @@ async function requestUploadMetaGeneration({
   return typeof metaPath === 'string' ? metaPath : null;
 }
 
+async function requestBodyAnalysis({
+  jobId,
+  filename,
+  inputPath,
+  force,
+  videoMeta,
+}) {
+  const url = bodyUrl('/v1/body/from-video');
+  if (!url || !jobId || !filename || !inputPath) {
+    return { ok: false, skipped: true, reason: 'body analyzer not configured' };
+  }
+
+  const response = await inferFetchJson(url, {
+    method: 'POST',
+    body: {
+      jobId,
+      filename,
+      inputPath,
+      force: Boolean(force),
+      videoMeta: videoMeta || null,
+    },
+    timeoutMs: 15000,
+  });
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      skipped: false,
+      reason:
+        response.json?.detail?.errorMessage ||
+        response.json?.detail?.message ||
+        response.json?.detail?.error ||
+        response.json?.message ||
+        response.json?.error ||
+        response.error?.message ||
+        'body analyzer request failed',
+      status: response.status,
+      textSnippet: response.textSnippet || null,
+    };
+  }
+
+  return {
+    ok: true,
+    bodyPath: response.json?.bodyPath || response.json?.path || null,
+    metrics: response.json?.metrics || null,
+    status: response.status,
+    textSnippet: response.textSnippet || null,
+  };
+}
+
 function buildQueuedUploadShot(file, body) {
   const existing = shotStore.getShotByMediaName(file.filename);
   const sourceType = body.sourceType || existing?.sourceType || 'upload';
@@ -1158,6 +1288,8 @@ async function analyzeAndStoreUploadedShot(file, body) {
       ? resolveMetaPath(body.metaPath, jobId)
       : null;
   let effectiveMetaPath = explicitMetaPath;
+  let effectiveBodyPath =
+    typeof body.bodyPath === 'string' && body.bodyPath.trim().length > 0 ? body.bodyPath.trim() : null;
   let progress = buildAnalysisProgress('upload_received', { metaPath: effectiveMetaPath });
   const createPendingShot = (patch = {}) => {
     const shot = {
@@ -1172,7 +1304,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
         path: file.path,
         size: file.size,
       },
-      metadata: { ...meta, metaPath: effectiveMetaPath || undefined, ...patch.metadata },
+      metadata: { ...meta, metaPath: effectiveMetaPath || undefined, bodyPath: effectiveBodyPath || undefined, ...patch.metadata },
       analysis: patch.analysis ?? existing?.analysis ?? null,
       progress: patch.progress || progress,
     };
@@ -1190,11 +1322,20 @@ async function analyzeAndStoreUploadedShot(file, body) {
   createPendingShot();
 
   if (explicitMetaPath) {
-    updateProgress('meta_ready');
+    progress = buildGroupedProgress('club_ready', {
+      analysisPath: 'infer',
+      metaPath: effectiveMetaPath,
+      bodyPath: effectiveBodyPath,
+    });
     createPendingShot();
     const metaReady = await waitForFile(effectiveMetaPath, 2000);
     if (metaReady) {
-      updateProgress('infer_submitting', { analysisPath: 'infer' });
+      progress = buildGroupedProgress('fusion_running', {
+        analysisPath: 'infer',
+        metaPath: effectiveMetaPath,
+        bodyPath: effectiveBodyPath,
+        detail: { source: 'provided-meta' },
+      });
       mergeAnalysisCache(jobId, {
         status: 'pending',
         analysis: null,
@@ -1215,24 +1356,21 @@ async function analyzeAndStoreUploadedShot(file, body) {
       };
       const submitResult = await submitInferJobAndWait(jobId, requestBody);
       if (submitResult.accepted) {
-        updateProgress(
-          submitResult.status === 'done'
-            ? 'infer_succeeded'
-            : submitResult.status === 'running'
-            ? 'infer_running'
-            : 'infer_pending',
-          {
-            analysisPath: 'infer',
-            detail: {
-              submitStatus: submitResult.submitStatus,
-              submitDurationMs: submitResult.submitDurationMs || 0,
-              responseBodySnippet: submitResult.responseBodySnippet || null,
-              recoveredAfterSubmitFailure: submitResult.recoveredAfterSubmitFailure === true,
-              visibilityStatus: submitResult.visibility?.lastStatus ?? 0,
-              visibilityAttempts: submitResult.visibility?.attemptsUsed ?? 0,
-            },
+        progress = buildGroupedProgress(submitResult.status === 'done' ? 'fusion_succeeded' : 'fusion_running', {
+          analysisPath: 'infer',
+          metaPath: effectiveMetaPath,
+          bodyPath: effectiveBodyPath,
+          clubPath: effectiveMetaPath,
+          fusionPath: submitResult.status === 'done' ? analysisCachePath(jobId) : null,
+          detail: {
+            submitStatus: submitResult.submitStatus,
+            submitDurationMs: submitResult.submitDurationMs || 0,
+            responseBodySnippet: submitResult.responseBodySnippet || null,
+            recoveredAfterSubmitFailure: submitResult.recoveredAfterSubmitFailure === true,
+            visibilityStatus: submitResult.visibility?.lastStatus ?? 0,
+            visibilityAttempts: submitResult.visibility?.attemptsUsed ?? 0,
           },
-        );
+        });
         mergeAnalysisCache(jobId, {
           status:
             submitResult.status === 'done'
@@ -1320,9 +1458,53 @@ async function analyzeAndStoreUploadedShot(file, body) {
 
   const preparedVideoMeta = await getVideoMeta(prepared.path);
 
+  progress = buildGroupedProgress('pose_running', {
+    analysisPath: 'pending',
+    metaPath: effectiveMetaPath,
+    bodyPath: effectiveBodyPath,
+    detail: { source: 'body:/v1/body/from-video' },
+  });
+  createPendingShot();
+  const bodyResult = await requestBodyAnalysis({
+    jobId,
+    filename: file.filename,
+    inputPath: prepared.path,
+    force,
+    videoMeta: preparedVideoMeta,
+  });
+  if (bodyResult.ok) {
+    effectiveBodyPath = bodyResult.bodyPath || effectiveBodyPath;
+    progress = buildGroupedProgress('pose_ready', {
+      analysisPath: 'pending',
+      metaPath: effectiveMetaPath,
+      bodyPath: effectiveBodyPath,
+      detail: {
+        source: 'body:/v1/body/from-video',
+        bodyStatus: bodyResult.status || 200,
+      },
+    });
+    createPendingShot();
+  } else {
+    progress = buildGroupedProgress('video_ready', {
+      analysisPath: 'pending',
+      metaPath: effectiveMetaPath,
+      bodyPath: effectiveBodyPath,
+      detail: {
+        source: 'body:/v1/body/from-video',
+        bodySkipped: bodyResult.skipped === true,
+        bodyReason: bodyResult.reason || null,
+        bodyStatus: bodyResult.status || 0,
+        bodyResponseSnippet: bodyResult.textSnippet || null,
+      },
+    });
+    createPendingShot();
+  }
+
   if (!explicitMetaPath) {
-    updateProgress('meta_generation_requested', {
+    progress = buildGroupedProgress('club_running', {
       analysisPath: 'infer',
+      metaPath: effectiveMetaPath,
+      bodyPath: effectiveBodyPath,
       detail: { source: 'camera:/api/meta/from-file' },
     });
     createPendingShot();
@@ -1339,7 +1521,12 @@ async function analyzeAndStoreUploadedShot(file, body) {
     });
     if (generatedMetaPath) {
       effectiveMetaPath = resolveMetaPath(generatedMetaPath, jobId);
-      updateProgress('meta_ready', { analysisPath: 'infer' });
+      progress = buildGroupedProgress('club_ready', {
+        analysisPath: 'infer',
+        metaPath: effectiveMetaPath,
+        bodyPath: effectiveBodyPath,
+        clubPath: effectiveMetaPath,
+      });
       createPendingShot();
     } else {
       updateProgress('failed', {
@@ -1356,7 +1543,12 @@ async function analyzeAndStoreUploadedShot(file, body) {
   if (effectiveMetaPath) {
     const metaReady = await waitForFile(effectiveMetaPath, 2000);
     if (metaReady) {
-      updateProgress('infer_submitting', { analysisPath: 'infer' });
+      progress = buildGroupedProgress('fusion_running', {
+        analysisPath: 'infer',
+        metaPath: effectiveMetaPath,
+        bodyPath: effectiveBodyPath,
+        clubPath: effectiveMetaPath,
+      });
       mergeAnalysisCache(jobId, {
         status: 'pending',
         analysis: null,
@@ -1377,24 +1569,21 @@ async function analyzeAndStoreUploadedShot(file, body) {
       };
       const submitResult = await submitInferJobAndWait(jobId, requestBody);
       if (submitResult.accepted) {
-        updateProgress(
-          submitResult.status === 'done'
-            ? 'infer_succeeded'
-            : submitResult.status === 'running'
-            ? 'infer_running'
-            : 'infer_pending',
-          {
-            analysisPath: 'infer',
-            detail: {
-              submitStatus: submitResult.submitStatus,
-              submitDurationMs: submitResult.submitDurationMs || 0,
-              responseBodySnippet: submitResult.responseBodySnippet || null,
-              recoveredAfterSubmitFailure: submitResult.recoveredAfterSubmitFailure === true,
-              visibilityStatus: submitResult.visibility?.lastStatus ?? 0,
-              visibilityAttempts: submitResult.visibility?.attemptsUsed ?? 0,
-            },
+        progress = buildGroupedProgress(submitResult.status === 'done' ? 'fusion_succeeded' : 'fusion_running', {
+          analysisPath: 'infer',
+          metaPath: effectiveMetaPath,
+          bodyPath: effectiveBodyPath,
+          clubPath: effectiveMetaPath,
+          fusionPath: submitResult.status === 'done' ? analysisCachePath(jobId) : null,
+          detail: {
+            submitStatus: submitResult.submitStatus,
+            submitDurationMs: submitResult.submitDurationMs || 0,
+            responseBodySnippet: submitResult.responseBodySnippet || null,
+            recoveredAfterSubmitFailure: submitResult.recoveredAfterSubmitFailure === true,
+            visibilityStatus: submitResult.visibility?.lastStatus ?? 0,
+            visibilityAttempts: submitResult.visibility?.attemptsUsed ?? 0,
           },
-        );
+        });
         mergeAnalysisCache(jobId, {
           status:
             submitResult.status === 'done'
@@ -1616,9 +1805,10 @@ app.post('/api/analyze/from-file', async (req, res) => {
   if (!resolvedMetaPath) {
     return res.status(400).json({ ok: false, message: 'Invalid meta path' });
   }
-  let progress = buildAnalysisProgress('meta_ready', {
+  let progress = buildGroupedProgress('club_ready', {
     analysisPath: 'infer',
     metaPath: resolvedMetaPath,
+    clubPath: resolvedMetaPath,
   });
 
   const cached = readAnalysisCache(providedJobId);
@@ -1704,9 +1894,10 @@ app.post('/api/analyze/from-file', async (req, res) => {
     options: { force: Boolean(force) },
   };
 
-  progress = buildAnalysisProgress('infer_submitting', {
+  progress = buildGroupedProgress('fusion_running', {
     analysisPath: 'infer',
     metaPath: resolvedMetaPath,
+    clubPath: resolvedMetaPath,
   });
   mergeAnalysisCache(providedJobId, {
     status: 'pending',
@@ -1720,7 +1911,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
   if (!submitResult.accepted) {
     const errorMessage = submitResult.errorMessage || 'infer service unavailable';
     const analysis = buildInferErrorAnalysis(providedJobId, errorMessage);
-    progress = buildAnalysisProgress('failed', {
+    progress = buildGroupedProgress('failed', {
       analysisPath: 'infer',
       metaPath: resolvedMetaPath,
       message: errorMessage,
@@ -1750,25 +1941,20 @@ app.post('/api/analyze/from-file', async (req, res) => {
     });
   }
 
-  progress = buildAnalysisProgress(
-    submitResult.status === 'done'
-      ? 'infer_succeeded'
-      : submitResult.status === 'running'
-      ? 'infer_running'
-      : 'infer_pending',
-    {
-      analysisPath: 'infer',
-      metaPath: resolvedMetaPath,
-      detail: {
-        submitStatus: submitResult.submitStatus,
-        submitDurationMs: submitResult.submitDurationMs || 0,
-        responseBodySnippet: submitResult.responseBodySnippet || null,
-        recoveredAfterSubmitFailure: submitResult.recoveredAfterSubmitFailure === true,
-        visibilityStatus: submitResult.visibility?.lastStatus ?? 0,
-        visibilityAttempts: submitResult.visibility?.attemptsUsed ?? 0,
-      },
+  progress = buildGroupedProgress(submitResult.status === 'done' ? 'fusion_succeeded' : 'fusion_running', {
+    analysisPath: 'infer',
+    metaPath: resolvedMetaPath,
+    clubPath: resolvedMetaPath,
+    fusionPath: submitResult.status === 'done' ? analysisCachePath(providedJobId) : null,
+    detail: {
+      submitStatus: submitResult.submitStatus,
+      submitDurationMs: submitResult.submitDurationMs || 0,
+      responseBodySnippet: submitResult.responseBodySnippet || null,
+      recoveredAfterSubmitFailure: submitResult.recoveredAfterSubmitFailure === true,
+      visibilityStatus: submitResult.visibility?.lastStatus ?? 0,
+      visibilityAttempts: submitResult.visibility?.attemptsUsed ?? 0,
     },
-  );
+  });
   writeAnalysisCache(providedJobId, {
     status:
       submitResult.status === 'done'
@@ -1849,11 +2035,13 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
 
   const mappedStatus = mapInferStatus(statusRes.json?.status || statusRes.json?.state);
   let analysis = cachedAnalysis;
-  let progress = buildAnalysisProgress(
-    mappedStatus === 'done' ? 'infer_succeeded' : mappedStatus === 'failed' ? 'failed' : mappedStatus === 'running' ? 'infer_running' : 'infer_pending',
+  let progress = buildGroupedProgress(
+    mappedStatus === 'done' ? 'fusion_succeeded' : mappedStatus === 'failed' ? 'failed' : 'fusion_running',
     {
       analysisPath: 'infer',
       metaPath: cached?.metaPath || null,
+      clubPath: cached?.metaPath || null,
+      fusionPath: mappedStatus === 'done' ? analysisCachePath(jobId) : null,
     },
   );
 
@@ -1863,11 +2051,16 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
       const resultRes = await inferFetchJson(resultUrl, { timeoutMs: 3000 });
       if (resultRes.ok) {
         analysis = normalizeInferResult(jobId, mappedStatus, resultRes.json);
-        progress = buildAnalysisProgress(mappedStatus === 'done' ? 'infer_succeeded' : 'failed', {
+        progress = buildGroupedProgress(mappedStatus === 'done' ? 'fusion_succeeded' : 'failed', {
           analysisPath: 'infer',
           metaPath: cached?.metaPath || null,
+          clubPath: cached?.metaPath || null,
+          fusionPath: mappedStatus === 'done' ? analysisCachePath(jobId) : null,
           message: mappedStatus === 'failed' ? analysis?.errorMessage || PROGRESS_STAGE_META.failed.message : undefined,
         });
+        if (analysis && typeof analysis === 'object') {
+          analysis.progress = progress;
+        }
       } else if (!analysis) {
         const errorAnalysis = buildInferErrorAnalysis(jobId, 'infer result unavailable');
         progress = buildAnalysisProgress('failed', {
@@ -1886,6 +2079,9 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
       }
     }
   } else if (includeResult) {
+    if (analysis && typeof analysis === 'object' && !analysis.progress) {
+      analysis.progress = progress;
+    }
     writeAnalysisCache(jobId, {
       status: mappedStatus,
       analysis,
@@ -1896,6 +2092,9 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
     return { status: mappedStatus, analysis, progress };
   }
 
+  if (analysis && typeof analysis === 'object' && !analysis.progress) {
+    analysis.progress = progress;
+  }
   writeAnalysisCache(jobId, {
     status: mappedStatus,
     analysis,
