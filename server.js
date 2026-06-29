@@ -1994,6 +1994,12 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
   const cachedStatus = cached?.status;
   const cachedAnalysis = cached?.analysis || null;
   const cachedProgress = cached?.progress || null;
+  const cachedMetaPath = cachedProgress?.metaPath || cached?.metaPath || null;
+  const cachedBodyPath = cachedProgress?.bodyPath || null;
+  const cachedClubPath = cachedProgress?.clubPath || cachedMetaPath || null;
+  const cachedFusionPath = cachedProgress?.fusionPath || null;
+  const cachedDetail =
+    cachedProgress?.detail && typeof cachedProgress.detail === 'object' ? cachedProgress.detail : {};
 
   const statusUrl = inferUrl(`/v1/jobs/${encodeURIComponent(jobId)}`);
   if (!statusUrl) {
@@ -2047,9 +2053,11 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
     mappedStatus === 'done' ? 'fusion_succeeded' : mappedStatus === 'failed' ? 'failed' : 'fusion_running',
     {
       analysisPath: 'infer',
-      metaPath: cached?.metaPath || null,
-      clubPath: cached?.metaPath || null,
-      fusionPath: mappedStatus === 'done' ? analysisCachePath(jobId) : null,
+      metaPath: cachedMetaPath,
+      bodyPath: cachedBodyPath,
+      clubPath: cachedClubPath,
+      fusionPath: mappedStatus === 'done' ? cachedFusionPath || analysisCachePath(jobId) : cachedFusionPath,
+      detail: cachedDetail,
     },
   );
 
@@ -2061,10 +2069,12 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
         analysis = normalizeInferResult(jobId, mappedStatus, resultRes.json);
         progress = buildGroupedProgress(mappedStatus === 'done' ? 'fusion_succeeded' : 'failed', {
           analysisPath: 'infer',
-          metaPath: cached?.metaPath || null,
-          clubPath: cached?.metaPath || null,
-          fusionPath: mappedStatus === 'done' ? analysisCachePath(jobId) : null,
+          metaPath: cachedMetaPath,
+          bodyPath: cachedBodyPath,
+          clubPath: cachedClubPath,
+          fusionPath: mappedStatus === 'done' ? cachedFusionPath || analysisCachePath(jobId) : cachedFusionPath,
           message: mappedStatus === 'failed' ? analysis?.errorMessage || PROGRESS_STAGE_META.failed.message : undefined,
+          detail: cachedDetail,
         });
         if (analysis && typeof analysis === 'object') {
           analysis.progress = progress;
