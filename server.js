@@ -1312,10 +1312,18 @@ async function analyzeAndStoreUploadedShot(file, body) {
     return shot;
   };
   const updateProgress = (stage, patch = {}) => {
-    progress = buildAnalysisProgress(stage, {
+    const mergedPatch = {
       metaPath: effectiveMetaPath,
+      bodyPath: effectiveBodyPath,
       ...patch,
-    });
+    };
+    if (mergedPatch.analysisPath === 'infer' && !mergedPatch.clubPath && effectiveMetaPath) {
+      mergedPatch.clubPath = effectiveMetaPath;
+    }
+    const groupedStage =
+      ['pose_running', 'pose_ready', 'club_running', 'club_ready', 'fusion_running', 'fusion_succeeded'].includes(stage) ||
+      Boolean(mergedPatch.bodyPath || mergedPatch.clubPath || mergedPatch.fusionPath);
+    progress = groupedStage ? buildGroupedProgress(stage, mergedPatch) : buildAnalysisProgress(stage, mergedPatch);
     return progress;
   };
 
