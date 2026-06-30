@@ -28,11 +28,14 @@ const inferBaseUrl = process.env.INFER_BASE_URL || 'http://127.0.0.1:3002';
 const cameraBaseUrl = process.env.CAMERA_BASE_URL || 'http://127.0.0.1:3001';
 const bodyAnalyzerBaseUrl = process.env.BODY_ANALYZER_BASE_URL || inferBaseUrl;
 const analysisCacheDir = path.join(dataDir, 'analysis');
+const debugDir = path.join(dataDir, 'debug');
+const inferDebugFrameDir = path.join(debugDir, 'infer-frames');
 
 // Ensure upload directory exists
 fs.mkdirSync(uploadDir, { recursive: true });
 fs.mkdirSync(dataDir, { recursive: true });
 fs.mkdirSync(analysisCacheDir, { recursive: true });
+fs.mkdirSync(inferDebugFrameDir, { recursive: true });
 fs.mkdirSync(healthDir, { recursive: true });
 
 // Configure multer storage: timestamp prefix keeps uploads unique
@@ -543,6 +546,111 @@ function readAnalysisCache(jobId) {
   } catch {
     return null;
   }
+}
+
+function isSafeJobId(jobId) {
+  return typeof jobId === 'string' && jobId.length > 0 && !jobId.includes('/') && !jobId.includes('\\');
+}
+
+async function readJsonFile(filePath) {
+  if (!filePath) return null;
+  try {
+    const raw = await fs.promises.readFile(filePath, 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function resolveDebugMetaPath(jobId) {
+  const shot = shotStore.getShotByJobId(jobId);
+  const cached = readAnalysisCache(jobId);
+  return (
+    resolveMetaPath(cached?.progress?.metaPath, jobId) ||
+    resolveMetaPath(cached?.metaPath, jobId) ||
+    resolveMetaPath(shot?.progress?.metaPath, jobId) ||
+    resolveMetaPath(shot?.metadata?.metaPath, jobId) ||
+    resolveMetaPath(null, jobId)
+  );
+}
+
+function resolveDebugVideoPath(jobId) {
+  const shot = shotStore.getShotByJobId(jobId);
+  if (shot?.media?.path && fs.existsSync(shot.media.path)) {
+    return shot.media.path;
+  }
+  if (shot?.media?.filename) {
+    const uploadPath = resolveUploadPath(shot.media.filename);
+    if (uploadPath && fs.existsSync(uploadPath)) return uploadPath;
+  }
+  return null;
+}
+
+function frameTimeMs(frame, index, fps) {
+  const direct = Number(frame?.t ?? frame?.timeMs ?? frame?.timestampMs);
+  if (Number.isFinite(direct)) return Math.max(0, Math.round(direct));
+  const frameIndex = Number(frame?.frame ?? frame?.frameIndex ?? index);
+  const safeFps = Number.isFinite(Number(fps)) && Number(fps) > 0 ? Number(fps) : 30;
+  return Math.max(0, Math.round((frameIndex * 1000) / safeFps));
+}
+
+function selectDebugFrames(frames, limit) {
+  if (!Array.isArray(frames) || frames.length === 0) return [];
+  const safeLimit = Math.max(1, Math.min(48, Number(limit) || 24));
+  if (frames.length <= safeLimit) {
+    return frames.map((frame, index) => ({ frame, index }));
+  }
+  const selected = [];
+  const seen = new Set();
+  for (let i = 0; i < safeLimit; i += 1) {
+    const index = Math.round((i * (frames.length - 1)) / Math.max(1, safeLimit - 1));
+    if (seen.has(index)) continue;
+    seen.add(index);
+    selected.push({ frame: frames[index], index });
+  }
+  return selected;
+}
+
+function normalizeDebugDetection(det) {
+  if (!det || typeof det !== 'object') return null;
+  const bbox = Array.isArray(det.bbox) ? det.bbox.map(Number) : null;
+  if (!bbox || bbox.length < 4 || bbox.some((value) => !Number.isFinite(value))) return null;
+  const label = det.label ?? det.class ?? det.className ?? det.name ?? det.classId ?? 'unknown';
+  const confidence = Number(det.conf ?? det.confidence ?? det.score ?? 0);
+  return {
+    label: String(label || 'unknown'),
+    classId: det.classId ?? det.class_id ?? null,
+    confidence: Number.isFinite(confidence) ? confidence : 0,
+    bbox: bbox.slice(0, 4),
+  };
+}
+
+async function extractDebugFrameImage(videoPath, outPath, timeMs) {
+  if (fs.existsSync(outPath)) return;
+  const { ffmpeg } = await ensureFfmpegAvailability();
+  if (!ffmpeg) {
+    throw new Error('ffmpeg not available');
+  }
+  await fs.promises.mkdir(path.dirname(outPath), { recursive: true });
+  const seconds = Math.max(0, Number(timeMs) || 0) / 1000;
+  await runCommand(
+    'ffmpeg',
+    [
+      '-y',
+      '-ss',
+      seconds.toFixed(3),
+      '-i',
+      videoPath,
+      '-frames:v',
+      '1',
+      '-vf',
+      'scale=w=720:h=720:force_original_aspect_ratio=decrease',
+      '-q:v',
+      '3',
+      outPath,
+    ],
+    { timeoutMs: 20_000 },
+  );
 }
 
 const PROGRESS_STAGE_META = {
@@ -2408,6 +2516,75 @@ app.get('/api/files/detail', async (_req, res) => {
   }
 });
 
+app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
+  const jobId = req.params.jobId;
+  if (!isSafeJobId(jobId)) {
+    return res.status(400).json({ ok: false, message: 'Invalid jobId' });
+  }
+
+  const limit = Math.max(1, Math.min(48, Number(req.query.limit) || 24));
+  const force = toBoolean(req.query.force);
+  const metaPath = resolveDebugMetaPath(jobId);
+  const videoPath = resolveDebugVideoPath(jobId);
+  if (!metaPath) {
+    return res.status(404).json({ ok: false, message: 'meta not found', jobId });
+  }
+  if (!videoPath) {
+    return res.status(404).json({ ok: false, message: 'video not found', jobId, metaPath });
+  }
+
+  const meta = await readJsonFile(metaPath);
+  const frames = Array.isArray(meta?.frames) ? meta.frames : [];
+  if (!frames.length) {
+    return res.status(404).json({ ok: false, message: 'meta frames missing', jobId, metaPath });
+  }
+
+  const jobFrameDir = path.join(inferDebugFrameDir, jobId);
+  if (force) {
+    await fs.promises.rm(jobFrameDir, { recursive: true, force: true }).catch(() => {});
+  }
+  await fs.promises.mkdir(jobFrameDir, { recursive: true });
+
+  const selected = selectDebugFrames(frames, limit);
+  const debugFrames = [];
+  const labelCounts = {};
+  for (const { frame, index } of selected) {
+    const timeMs = frameTimeMs(frame, index, meta?.fps);
+    const imageName = `frame_${String(index).padStart(5, '0')}_${String(timeMs).padStart(6, '0')}.jpg`;
+    const imagePath = path.join(jobFrameDir, imageName);
+    await extractDebugFrameImage(videoPath, imagePath, timeMs);
+    const detections = (Array.isArray(frame?.detections) ? frame.detections : [])
+      .map(normalizeDebugDetection)
+      .filter(Boolean);
+    detections.forEach((det) => {
+      labelCounts[det.label] = (labelCounts[det.label] || 0) + 1;
+    });
+    debugFrames.push({
+      index,
+      frame: frame?.frame ?? frame?.frameIndex ?? index,
+      timeMs,
+      imageUrl: `/debug/infer-frames/${encodeURIComponent(jobId)}/${encodeURIComponent(imageName)}`,
+      detections,
+    });
+  }
+
+  return res.json({
+    ok: true,
+    jobId,
+    metaPath,
+    videoPath,
+    meta: {
+      fps: meta?.fps ?? null,
+      width: meta?.width ?? null,
+      height: meta?.height ?? null,
+      durationMs: meta?.durationMs ?? null,
+      frames: frames.length,
+    },
+    labelCounts,
+    frames: debugFrames,
+  });
+});
+
 // Delete a file by name
 app.delete('/api/files/:name', async (req, res) => {
   const resolvedUpload = path.resolve(uploadDir);
@@ -2432,6 +2609,7 @@ app.delete('/api/files/:name', async (req, res) => {
 
 // Serve uploaded files statically; fallthrough false to avoid SPA fallback on 404
 app.use('/uploads', express.static(uploadDir, { fallthrough: false }));
+app.use('/debug', express.static(debugDir, { fallthrough: false }));
 // Health check folder so frontend can verify backend availability
 app.use('/health', express.static(healthDir, { fallthrough: false }));
 
