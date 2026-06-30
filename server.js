@@ -562,7 +562,11 @@ async function readJsonFile(filePath) {
   }
 }
 
-function resolveDebugMetaPath(jobId) {
+function resolveDebugMetaPath(jobId, variant) {
+  if (variant === 'debug') {
+    const debugMetaPath = resolveMetaPath(path.join(metaDir, `${jobId}.debug.meta.json`), jobId);
+    if (debugMetaPath && fs.existsSync(debugMetaPath)) return debugMetaPath;
+  }
   const shot = shotStore.getShotByJobId(jobId);
   const cached = readAnalysisCache(jobId);
   return (
@@ -938,6 +942,20 @@ function isJobAnalysisPayload(result) {
   return Boolean(result?.metrics?.ball) && Boolean(result?.events);
 }
 
+function mapInferResultStatus(result, fallbackStatus) {
+  const rawStatus = String(result?.status || '').toLowerCase();
+  if (result?.ok === true && (rawStatus === 'done' || rawStatus === 'succeeded' || rawStatus === 'success')) {
+    return 'succeeded';
+  }
+  if (rawStatus === 'done' || rawStatus === 'succeeded' || rawStatus === 'success') return 'succeeded';
+  if (rawStatus === 'failed' || rawStatus === 'error') return 'failed';
+  if (rawStatus === 'running' || rawStatus === 'queued' || rawStatus === 'pending') return 'running';
+  if (fallbackStatus === 'done') return 'succeeded';
+  if (fallbackStatus === 'failed') return 'failed';
+  if (fallbackStatus === 'running') return 'running';
+  return rawStatus || 'running';
+}
+
 function normalizeInferResult(jobId, status, result) {
   if (!result || typeof result !== 'object') {
     return buildCoachAnalysisPayload(jobId, status, {});
@@ -946,18 +964,7 @@ function normalizeInferResult(jobId, status, result) {
     return normalizeInferResult(jobId, status, result.analysis);
   }
   if (isJobAnalysisPayload(result)) {
-    const mappedStatus =
-      status === 'done'
-        ? 'succeeded'
-        : status === 'failed'
-        ? 'failed'
-        : status === 'running'
-        ? 'running'
-        : result.status === 'done'
-        ? 'succeeded'
-        : result.status === 'failed'
-        ? 'failed'
-        : result.status;
+    const mappedStatus = mapInferResultStatus(result, status);
     return {
       ok: result.ok !== false,
       jobId: result.jobId || jobId,
@@ -2230,18 +2237,28 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
       const resultRes = await inferFetchJson(resultUrl, { timeoutMs: 3000 });
       if (resultRes.ok) {
         analysis = normalizeInferResult(jobId, mappedStatus, resultRes.json);
-        progress = buildGroupedProgress(mappedStatus === 'done' ? 'fusion_succeeded' : 'failed', {
+        const resultSucceeded = analysis?.status === 'succeeded' && analysis?.errorCode == null;
+        const nextStatus = resultSucceeded ? 'done' : mappedStatus;
+        progress = buildGroupedProgress(resultSucceeded ? 'fusion_succeeded' : 'failed', {
           analysisPath: 'infer',
           metaPath: cachedMetaPath,
           bodyPath: cachedBodyPath,
           clubPath: cachedClubPath,
-          fusionPath: mappedStatus === 'done' ? cachedFusionPath || analysisCachePath(jobId) : cachedFusionPath,
-          message: mappedStatus === 'failed' ? analysis?.errorMessage || PROGRESS_STAGE_META.failed.message : undefined,
+          fusionPath: resultSucceeded ? cachedFusionPath || analysisCachePath(jobId) : cachedFusionPath,
+          message: resultSucceeded ? undefined : analysis?.errorMessage || PROGRESS_STAGE_META.failed.message,
           detail: cachedDetail,
         });
         if (analysis && typeof analysis === 'object') {
           analysis.progress = progress;
         }
+        writeAnalysisCache(jobId, {
+          status: nextStatus,
+          analysis,
+          errorCode: analysis?.errorCode ?? null,
+          errorMessage: analysis?.errorMessage ?? null,
+          progress,
+        });
+        return { status: nextStatus, analysis, progress };
       } else if (!analysis) {
         const errorAnalysis = buildInferErrorAnalysis(jobId, 'infer result unavailable');
         progress = buildAnalysisProgress('failed', {
@@ -2524,7 +2541,8 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
 
   const limit = Math.max(1, Math.min(48, Number(req.query.limit) || 24));
   const force = toBoolean(req.query.force);
-  const metaPath = resolveDebugMetaPath(jobId);
+  const variant = req.query.variant === 'debug' ? 'debug' : 'main';
+  const metaPath = resolveDebugMetaPath(jobId, variant);
   const videoPath = resolveDebugVideoPath(jobId);
   if (!metaPath) {
     return res.status(404).json({ ok: false, message: 'meta not found', jobId });
@@ -2571,6 +2589,7 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
   return res.json({
     ok: true,
     jobId,
+    variant,
     metaPath,
     videoPath,
     meta: {
@@ -2582,6 +2601,63 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
     },
     labelCounts,
     frames: debugFrames,
+  });
+});
+
+app.post('/api/debug/infer/:jobId/debug-meta', async (req, res) => {
+  const jobId = req.params.jobId;
+  if (!isSafeJobId(jobId)) {
+    return res.status(400).json({ ok: false, message: 'Invalid jobId' });
+  }
+  const url = cameraUrl('/api/meta/from-file');
+  if (!url) {
+    return res.status(500).json({ ok: false, message: 'camera service not configured' });
+  }
+  const shot = shotStore.getShotByJobId(jobId);
+  const videoPath = resolveDebugVideoPath(jobId);
+  if (!videoPath) {
+    return res.status(404).json({ ok: false, message: 'video not found', jobId });
+  }
+  const videoMeta = await getVideoMeta(videoPath);
+  const filename = shot?.media?.filename || path.basename(videoPath);
+  const response = await inferFetchJson(url, {
+    method: 'POST',
+    body: {
+      jobId,
+      filename,
+      inputPath: videoPath,
+      model: 'yolov8n_service7',
+      force: true,
+      debugDetections: true,
+      durationSec:
+        Number.isFinite(videoMeta?.durationMs) && videoMeta.durationMs > 0
+          ? videoMeta.durationMs / 1000
+          : undefined,
+      durationMs: videoMeta?.durationMs,
+      width: videoMeta?.width,
+      height: videoMeta?.height,
+      fps: videoMeta?.fps,
+    },
+    timeoutMs: 180_000,
+  });
+  if (!response.ok) {
+    return res.status(response.status || 500).json({
+      ok: false,
+      message:
+        response.json?.error ||
+        response.json?.message ||
+        response.error?.message ||
+        'debug meta generation failed',
+      status: response.status,
+      responseBodySnippet: response.textSnippet || null,
+    });
+  }
+  return res.json({
+    ok: true,
+    jobId,
+    metaPath: response.json?.metaPath || null,
+    debugMetaPath: response.json?.debugMetaPath || null,
+    cached: response.json?.cached === true,
   });
 });
 
