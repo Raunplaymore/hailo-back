@@ -677,10 +677,10 @@ function buildGroupedProgress(stage, patch = {}) {
   return buildAnalysisProgress(stage, {
     ...patch,
     detail: {
+      ...baseDetail,
       bodyPipeline,
       clubPipeline: 'service7-meta',
       fusionPipeline: patch.analysisPath === 'infer' ? 'hailo-infer' : 'unknown',
-      ...baseDetail,
     },
   });
 }
@@ -1142,7 +1142,7 @@ async function requestBodyAnalysis({
       force: Boolean(force),
       videoMeta: videoMeta || null,
     },
-    timeoutMs: 15000,
+    timeoutMs: 60000,
   });
 
   const fallbackBodyPath = bodyArtifactPath(jobId);
@@ -1169,6 +1169,7 @@ async function requestBodyAnalysis({
         response.json?.detail?.error ||
         response.json?.message ||
         response.json?.error ||
+        (response.error?.name === 'AbortError' ? 'body analyzer request timed out' : null) ||
         response.error?.message ||
         'body analyzer request failed',
       status: response.status,
