@@ -26,7 +26,7 @@ const metaDir = process.env.META_DIR || '/tmp';
 const healthDir = path.join(__dirname, 'health');
 const inferBaseUrl = process.env.INFER_BASE_URL || 'http://127.0.0.1:3002';
 const cameraBaseUrl = process.env.CAMERA_BASE_URL || 'http://127.0.0.1:3001';
-const bodyAnalyzerBaseUrl = process.env.BODY_ANALYZER_BASE_URL || '';
+const bodyAnalyzerBaseUrl = process.env.BODY_ANALYZER_BASE_URL || inferBaseUrl;
 const analysisCacheDir = path.join(dataDir, 'analysis');
 
 // Ensure upload directory exists
@@ -1367,6 +1367,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
       analysisPath: 'infer',
       metaPath: effectiveMetaPath,
       bodyPath: effectiveBodyPath,
+      detail: mergeProgressDetail({ source: 'provided-meta' }),
     });
     createPendingShot();
     const metaReady = await waitForFile(effectiveMetaPath, 2000);
@@ -1567,6 +1568,10 @@ async function analyzeAndStoreUploadedShot(file, body) {
         metaPath: effectiveMetaPath,
         bodyPath: effectiveBodyPath,
         clubPath: effectiveMetaPath,
+        detail: mergeProgressDetail({
+          source: 'camera:/api/meta/from-file',
+          generatedMetaPath: effectiveMetaPath,
+        }),
       });
       createPendingShot();
     } else {
