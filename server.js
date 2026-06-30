@@ -1376,7 +1376,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
         analysisPath: 'infer',
         metaPath: effectiveMetaPath,
         bodyPath: effectiveBodyPath,
-        detail: { source: 'provided-meta' },
+        detail: mergeProgressDetail({ source: 'provided-meta' }),
       });
       mergeAnalysisCache(jobId, {
         status: 'pending',
@@ -1594,6 +1594,9 @@ async function analyzeAndStoreUploadedShot(file, body) {
         metaPath: effectiveMetaPath,
         bodyPath: effectiveBodyPath,
         clubPath: effectiveMetaPath,
+        detail: mergeProgressDetail({
+          metaReady: true,
+        }),
       });
       mergeAnalysisCache(jobId, {
         status: 'pending',
