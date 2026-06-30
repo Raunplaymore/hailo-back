@@ -2618,14 +2618,23 @@ app.post('/api/debug/infer/:jobId/debug-meta', async (req, res) => {
   if (!videoPath) {
     return res.status(404).json({ ok: false, message: 'video not found', jobId });
   }
-  const videoMeta = await getVideoMeta(videoPath);
   const filename = shot?.media?.filename || path.basename(videoPath);
+  const prepared = await prepareVideoForAnalysis(videoPath, filename);
+  if (prepared.ok === false) {
+    return res.status(400).json({
+      ok: false,
+      message: `video preparation failed: ${prepared.error}`,
+      codec: prepared.codec ?? null,
+    });
+  }
+  const inputPath = prepared.path || videoPath;
+  const videoMeta = await getVideoMeta(inputPath);
   const response = await inferFetchJson(url, {
     method: 'POST',
     body: {
       jobId,
       filename,
-      inputPath: videoPath,
+      inputPath,
       model: 'yolov8n_service7',
       force: true,
       debugDetections: true,
@@ -2657,6 +2666,9 @@ app.post('/api/debug/infer/:jobId/debug-meta', async (req, res) => {
     jobId,
     metaPath: response.json?.metaPath || null,
     debugMetaPath: response.json?.debugMetaPath || null,
+    inputPath,
+    converted: prepared.converted === true,
+    conversion: prepared.conversion || null,
     cached: response.json?.cached === true,
   });
 });
