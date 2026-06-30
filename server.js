@@ -27,13 +27,15 @@ const healthDir = path.join(__dirname, 'health');
 const inferBaseUrl = process.env.INFER_BASE_URL || 'http://127.0.0.1:3002';
 const cameraBaseUrl = process.env.CAMERA_BASE_URL || 'http://127.0.0.1:3001';
 const bodyAnalyzerBaseUrl = process.env.BODY_ANALYZER_BASE_URL || inferBaseUrl;
-const analysisCacheDir = path.join(dataDir, 'analysis');
+const inferAnalysisDir = path.join(dataDir, 'analysis');
+const analysisCacheDir = process.env.ANALYSIS_CACHE_DIR || path.join(dataDir, 'service-analysis-cache');
 const debugDir = path.join(dataDir, 'debug');
 const inferDebugFrameDir = path.join(debugDir, 'infer-frames');
 
 // Ensure upload directory exists
 fs.mkdirSync(uploadDir, { recursive: true });
 fs.mkdirSync(dataDir, { recursive: true });
+fs.mkdirSync(inferAnalysisDir, { recursive: true });
 fs.mkdirSync(analysisCacheDir, { recursive: true });
 fs.mkdirSync(inferDebugFrameDir, { recursive: true });
 fs.mkdirSync(healthDir, { recursive: true });
@@ -532,9 +534,22 @@ function analysisCachePath(jobId) {
   return path.join(analysisCacheDir, `${jobId}.json`);
 }
 
+function inferAnalysisPath(jobId) {
+  if (!jobId) return null;
+  return path.join(inferAnalysisDir, `${jobId}.json`);
+}
+
 function bodyArtifactPath(jobId) {
   if (!jobId) return null;
   return path.join(dataDir, 'body', `${jobId}.json`);
+}
+
+function looksLikeServiceAnalysisCache(payload) {
+  return Boolean(
+    payload &&
+      typeof payload === 'object' &&
+      ('analysis' in payload || 'progress' in payload || 'updatedAt' in payload || 'metaPath' in payload),
+  );
 }
 
 function readAnalysisCache(jobId) {
@@ -544,7 +559,18 @@ function readAnalysisCache(jobId) {
     const raw = fs.readFileSync(cachePath, 'utf8');
     return JSON.parse(raw);
   } catch {
-    return null;
+    // Older pi_service builds wrote their wrapper cache into DATA_DIR/analysis,
+    // which is also hailo-infer's raw result directory. Only read legacy files
+    // that look like pi_service wrapper cache; otherwise leave infer results alone.
+    const legacyPath = inferAnalysisPath(jobId);
+    if (!legacyPath || legacyPath === cachePath) return null;
+    try {
+      const raw = fs.readFileSync(legacyPath, 'utf8');
+      const parsed = JSON.parse(raw);
+      return looksLikeServiceAnalysisCache(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -942,8 +968,34 @@ function isJobAnalysisPayload(result) {
   return Boolean(result?.metrics?.ball) && Boolean(result?.events);
 }
 
+function hasUsableInferMetrics(result) {
+  if (!result || typeof result !== 'object') return false;
+  const metrics = result.metrics;
+  if (!metrics || typeof metrics !== 'object') return false;
+  const events = result.events;
+  const hasEvent =
+    events &&
+    typeof events === 'object' &&
+    ['address', 'top', 'impact', 'finish', 'addressMs', 'topMs', 'impactMs', 'finishMs'].some(
+      (key) => events[key] !== null && events[key] !== undefined,
+    );
+  return Boolean(
+    hasEvent &&
+      (metrics.tempo ||
+        metrics.swingPlane ||
+        metrics.impactStability ||
+        metrics.shaftPlane ||
+        metrics.backswing ||
+        metrics.trackingQuality),
+  );
+}
+
 function mapInferResultStatus(result, fallbackStatus) {
   const rawStatus = String(result?.status || '').toLowerCase();
+  if (result?.errorCode || result?.ok === false || rawStatus === 'failed' || rawStatus === 'error') return 'failed';
+  if (!hasUsableInferMetrics(result) && (rawStatus === 'done' || rawStatus === 'succeeded' || rawStatus === 'success')) {
+    return 'failed';
+  }
   if (result?.ok === true && (rawStatus === 'done' || rawStatus === 'succeeded' || rawStatus === 'success')) {
     return 'succeeded';
   }
@@ -958,10 +1010,23 @@ function mapInferResultStatus(result, fallbackStatus) {
 
 function normalizeInferResult(jobId, status, result) {
   if (!result || typeof result !== 'object') {
-    return buildCoachAnalysisPayload(jobId, status, {});
+    return buildInferErrorAnalysis(jobId, 'infer result payload missing');
   }
   if (result.analysis && typeof result.analysis === 'object') {
     return normalizeInferResult(jobId, status, result.analysis);
+  }
+  if (!hasUsableInferMetrics(result)) {
+    const rawStatus = String(result.status || '').toLowerCase();
+    const errorMessage =
+      result.errorMessage ||
+      result.error ||
+      (rawStatus === 'running' || rawStatus === 'queued' || rawStatus === 'pending'
+        ? 'infer result not ready'
+        : 'infer result missing metrics/events');
+    return {
+      ...buildInferErrorAnalysis(jobId, errorMessage),
+      errorCode: result.errorCode || (rawStatus === 'running' || rawStatus === 'queued' || rawStatus === 'pending' ? 'INFER_RESULT_NOT_READY' : 'INFER_RESULT_EMPTY'),
+    };
   }
   if (isJobAnalysisPayload(result)) {
     const mappedStatus = mapInferResultStatus(result, status);
@@ -1519,7 +1584,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
           metaPath: effectiveMetaPath,
           bodyPath: effectiveBodyPath,
           clubPath: effectiveMetaPath,
-          fusionPath: submitResult.status === 'done' ? analysisCachePath(jobId) : null,
+          fusionPath: submitResult.status === 'done' ? inferAnalysisPath(jobId) : null,
           detail: {
             submitStatus: submitResult.submitStatus,
             submitDurationMs: submitResult.submitDurationMs || 0,
@@ -1739,7 +1804,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
           metaPath: effectiveMetaPath,
           bodyPath: effectiveBodyPath,
           clubPath: effectiveMetaPath,
-          fusionPath: submitResult.status === 'done' ? analysisCachePath(jobId) : null,
+          fusionPath: submitResult.status === 'done' ? inferAnalysisPath(jobId) : null,
           detail: mergeProgressDetail({
             submitStatus: submitResult.submitStatus,
             submitDurationMs: submitResult.submitDurationMs || 0,
@@ -2110,7 +2175,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
     analysisPath: 'infer',
     metaPath: resolvedMetaPath,
     clubPath: resolvedMetaPath,
-    fusionPath: submitResult.status === 'done' ? analysisCachePath(providedJobId) : null,
+    fusionPath: submitResult.status === 'done' ? inferAnalysisPath(providedJobId) : null,
     detail: {
       submitStatus: submitResult.submitStatus,
       submitDurationMs: submitResult.submitDurationMs || 0,
@@ -2226,7 +2291,7 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
       metaPath: cachedMetaPath,
       bodyPath: cachedBodyPath,
       clubPath: cachedClubPath,
-      fusionPath: mappedStatus === 'done' ? cachedFusionPath || analysisCachePath(jobId) : cachedFusionPath,
+      fusionPath: mappedStatus === 'done' ? cachedFusionPath || inferAnalysisPath(jobId) : cachedFusionPath,
       detail: cachedDetail,
     },
   );
@@ -2244,7 +2309,7 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
           metaPath: cachedMetaPath,
           bodyPath: cachedBodyPath,
           clubPath: cachedClubPath,
-          fusionPath: resultSucceeded ? cachedFusionPath || analysisCachePath(jobId) : cachedFusionPath,
+          fusionPath: resultSucceeded ? cachedFusionPath || inferAnalysisPath(jobId) : cachedFusionPath,
           message: resultSucceeded ? undefined : analysis?.errorMessage || PROGRESS_STAGE_META.failed.message,
           detail: cachedDetail,
         });
