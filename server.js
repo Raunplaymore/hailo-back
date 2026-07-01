@@ -655,7 +655,7 @@ function normalizeDebugDetection(det) {
   };
 }
 
-async function extractDebugFrameImage(videoPath, outPath, timeMs) {
+async function extractDebugFrameImageByTime(videoPath, outPath, timeMs) {
   if (fs.existsSync(outPath)) return;
   const { ffmpeg } = await ensureFfmpegAvailability();
   if (!ffmpeg) {
@@ -681,6 +681,42 @@ async function extractDebugFrameImage(videoPath, outPath, timeMs) {
     ],
     { timeoutMs: 20_000 },
   );
+}
+
+async function extractDebugFrameImage(videoPath, outPath, { timeMs, frameIndex }) {
+  if (fs.existsSync(outPath)) return;
+  const { ffmpeg } = await ensureFfmpegAvailability();
+  if (!ffmpeg) {
+    throw new Error('ffmpeg not available');
+  }
+  await fs.promises.mkdir(path.dirname(outPath), { recursive: true });
+  const numericFrame = Number(frameIndex);
+  if (Number.isFinite(numericFrame) && numericFrame >= 0) {
+    try {
+      await runCommand(
+        'ffmpeg',
+        [
+          '-y',
+          '-i',
+          videoPath,
+          '-vf',
+          `select=eq(n\\,${Math.round(numericFrame)}),scale=w=720:h=720:force_original_aspect_ratio=decrease`,
+          '-frames:v',
+          '1',
+          '-vsync',
+          '0',
+          '-q:v',
+          '3',
+          outPath,
+        ],
+        { timeoutMs: 25_000 },
+      );
+      return;
+    } catch {
+      await fs.promises.rm(outPath, { force: true }).catch(() => {});
+    }
+  }
+  await extractDebugFrameImageByTime(videoPath, outPath, timeMs);
 }
 
 const PROGRESS_STAGE_META = {
@@ -1677,7 +1713,16 @@ async function analyzeAndStoreUploadedShot(file, body) {
   }
 
   updateProgress('video_ready');
-  createPendingShot();
+  createPendingShot({
+    metadata: {
+      analysisInput: {
+        path: prepared.path,
+        converted: Boolean(prepared.converted),
+        conversion: prepared.conversion,
+        warning: prepared.warning,
+      },
+    },
+  });
 
   const preparedVideoMeta = await getVideoMeta(prepared.path);
 
@@ -2608,12 +2653,24 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
   const force = toBoolean(req.query.force);
   const variant = req.query.variant === 'debug' ? 'debug' : 'main';
   const metaPath = resolveDebugMetaPath(jobId, variant);
-  const videoPath = resolveDebugVideoPath(jobId);
+  const sourceVideoPath = resolveDebugVideoPath(jobId);
   if (!metaPath) {
     return res.status(404).json({ ok: false, message: 'meta not found', jobId });
   }
-  if (!videoPath) {
+  if (!sourceVideoPath) {
     return res.status(404).json({ ok: false, message: 'video not found', jobId, metaPath });
+  }
+  const shot = shotStore.getShotByJobId(jobId);
+  const storedInputPath = shot?.metadata?.analysisInput?.path;
+  let videoPath = storedInputPath && fs.existsSync(storedInputPath) ? storedInputPath : sourceVideoPath;
+  let imageSource = storedInputPath && fs.existsSync(storedInputPath) ? 'analysis-input' : 'source-video';
+  if (videoPath === sourceVideoPath) {
+    const filename = shot?.media?.filename || path.basename(sourceVideoPath);
+    const prepared = await prepareVideoForAnalysis(sourceVideoPath, filename);
+    if (prepared.ok !== false && prepared.path) {
+      videoPath = prepared.path;
+      imageSource = prepared.converted ? `prepared-${prepared.conversion || 'converted'}` : 'source-video';
+    }
   }
 
   const meta = await readJsonFile(metaPath);
@@ -2633,9 +2690,11 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
   const labelCounts = {};
   for (const { frame, index } of selected) {
     const timeMs = frameTimeMs(frame, index, meta?.fps);
-    const imageName = `frame_${String(index).padStart(5, '0')}_${String(timeMs).padStart(6, '0')}.jpg`;
+    const frameIndex = Number(frame?.frame ?? frame?.frameIndex ?? index);
+    const safeFrameIndex = Number.isFinite(frameIndex) ? Math.round(frameIndex) : index;
+    const imageName = `frame_${String(index).padStart(5, '0')}_n${String(safeFrameIndex).padStart(5, '0')}_${String(timeMs).padStart(6, '0')}.jpg`;
     const imagePath = path.join(jobFrameDir, imageName);
-    await extractDebugFrameImage(videoPath, imagePath, timeMs);
+    await extractDebugFrameImage(videoPath, imagePath, { timeMs, frameIndex: safeFrameIndex });
     const detections = (Array.isArray(frame?.detections) ? frame.detections : [])
       .map(normalizeDebugDetection)
       .filter(Boolean);
@@ -2644,7 +2703,7 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
     });
     debugFrames.push({
       index,
-      frame: frame?.frame ?? frame?.frameIndex ?? index,
+      frame: safeFrameIndex,
       timeMs,
       imageUrl: `/debug/infer-frames/${encodeURIComponent(jobId)}/${encodeURIComponent(imageName)}`,
       detections,
@@ -2657,6 +2716,8 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
     variant,
     metaPath,
     videoPath,
+    sourceVideoPath,
+    imageSource,
     meta: {
       fps: meta?.fps ?? null,
       width: meta?.width ?? null,
