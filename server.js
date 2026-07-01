@@ -2689,6 +2689,17 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
       .map((frame) => [Number(frame?.frameIndex), frame])
       .filter(([frameIndex]) => Number.isFinite(frameIndex)),
   );
+  const nearestBodyFrame = (targetFrameIndex) => {
+    if (!Number.isFinite(targetFrameIndex) || !bodyFrames.length) return null;
+    const best = bodyFrames
+      .map((frame) => ({
+        frame,
+        delta: Math.abs(Number(frame?.frameIndex) - targetFrameIndex),
+      }))
+      .filter((item) => Number.isFinite(item.delta))
+      .sort((a, b) => a.delta - b.delta)[0];
+    return best && best.delta <= 2 ? best.frame : null;
+  };
 
   const jobFrameDir = path.join(inferDebugFrameDir, jobId);
   if (force) {
@@ -2709,7 +2720,7 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
     const detections = (Array.isArray(frame?.detections) ? frame.detections : [])
       .map(normalizeDebugDetection)
       .filter(Boolean);
-    const bodyFrame = bodyFrameByIndex.get(safeFrameIndex) || null;
+    const bodyFrame = bodyFrameByIndex.get(safeFrameIndex) || nearestBodyFrame(safeFrameIndex);
     detections.forEach((det) => {
       labelCounts[det.label] = (labelCounts[det.label] || 0) + 1;
     });
