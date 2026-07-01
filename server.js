@@ -1610,6 +1610,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
           filename: file.filename,
           videoPath: file.path,
           metaPath: effectiveMetaPath,
+          bodyPath: effectiveBodyPath,
         },
         options: { force: Boolean(force) },
       };
@@ -1839,6 +1840,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
           filename: file.filename,
           videoPath: prepared.path,
           metaPath: effectiveMetaPath,
+          bodyPath: effectiveBodyPath,
         },
         options: { force: Boolean(force) },
       };
@@ -2165,6 +2167,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
       filename: targetFilename,
       videoPath,
       metaPath: resolvedMetaPath,
+      bodyPath: bodyArtifactPath(providedJobId),
     },
     options: { force: Boolean(force) },
   };
@@ -2678,6 +2681,14 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
   if (!frames.length) {
     return res.status(404).json({ ok: false, message: 'meta frames missing', jobId, metaPath });
   }
+  const bodyPath = bodyArtifactPath(jobId);
+  const bodyArtifact = await readJsonFile(bodyPath);
+  const bodyFrames = Array.isArray(bodyArtifact?.frames) ? bodyArtifact.frames : [];
+  const bodyFrameByIndex = new Map(
+    bodyFrames
+      .map((frame) => [Number(frame?.frameIndex), frame])
+      .filter(([frameIndex]) => Number.isFinite(frameIndex)),
+  );
 
   const jobFrameDir = path.join(inferDebugFrameDir, jobId);
   if (force) {
@@ -2698,6 +2709,7 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
     const detections = (Array.isArray(frame?.detections) ? frame.detections : [])
       .map(normalizeDebugDetection)
       .filter(Boolean);
+    const bodyFrame = bodyFrameByIndex.get(safeFrameIndex) || null;
     detections.forEach((det) => {
       labelCounts[det.label] = (labelCounts[det.label] || 0) + 1;
     });
@@ -2707,6 +2719,7 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
       timeMs,
       imageUrl: `/debug/infer-frames/${encodeURIComponent(jobId)}/${encodeURIComponent(imageName)}`,
       detections,
+      keypoints: bodyFrame?.keypoints || null,
     });
   }
 
@@ -2724,6 +2737,13 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
       height: meta?.height ?? null,
       durationMs: meta?.durationMs ?? null,
       frames: frames.length,
+    },
+    body: {
+      bodyPath: bodyArtifact ? bodyPath : null,
+      analysisVersion: bodyArtifact?.analysisVersion || null,
+      poseAvailable: bodyArtifact?.meta?.poseAvailable ?? null,
+      poseFrames: bodyArtifact?.debug?.poseFrames ?? null,
+      wristFrames: bodyArtifact?.debug?.wristFrames ?? null,
     },
     labelCounts,
     frames: debugFrames,
