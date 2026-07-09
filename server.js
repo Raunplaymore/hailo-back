@@ -29,7 +29,7 @@ const cameraBaseUrl = process.env.CAMERA_BASE_URL || 'http://127.0.0.1:3001';
 const bodyAnalyzerBaseUrl = process.env.BODY_ANALYZER_BASE_URL || inferBaseUrl;
 const inferAnalysisDir = path.join(dataDir, 'analysis');
 const analysisCacheDir = process.env.ANALYSIS_CACHE_DIR || path.join(dataDir, 'service-analysis-cache');
-const expectedInferAnalysisVersion = process.env.INFER_ANALYSIS_VERSION || 'hailo-coach-service7-v7';
+const expectedInferAnalysisVersion = process.env.INFER_ANALYSIS_VERSION || 'hailo-coach-service7-v8';
 const debugDir = path.join(dataDir, 'debug');
 const inferDebugFrameDir = path.join(debugDir, 'infer-frames');
 
@@ -413,6 +413,7 @@ function buildJobAnalysisPayload(shot) {
     pending: DEFAULT_PENDING_ITEMS,
     summary,
     coachSummary,
+    coachFindings: Array.isArray(analysis.coachFindings) ? analysis.coachFindings : [],
     confidence: Number.isFinite(confidence) ? confidence : null,
     errorMessage: analysis?.errorMessage,
     meta: analysis?.meta,
@@ -995,6 +996,7 @@ function buildCoachAnalysisPayload(jobId, status, result) {
     errorMessage: result?.errorMessage ?? null,
     summary: result?.summary ?? null,
     coachSummary: result?.coachSummary ?? result?.coach_summary ?? [],
+    coachFindings: result?.coachFindings ?? result?.coach_findings ?? result?.debug?.coachFindings ?? [],
     confidence: result?.confidence ?? null,
     meta: result?.meta ?? null,
     progress: result?.progress ?? null,
@@ -1078,6 +1080,7 @@ function normalizeInferResult(jobId, status, result) {
       metrics: result.metrics || null,
       summary: result.summary ?? null,
       coachSummary: result.coachSummary ?? result.coach_summary ?? [],
+      coachFindings: result.coachFindings ?? result.coach_findings ?? result.debug?.coachFindings ?? [],
       confidence: result.confidence ?? null,
       meta: result.meta ?? null,
       debug: result.debug ?? null,
