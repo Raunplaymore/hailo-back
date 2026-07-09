@@ -29,6 +29,7 @@ const cameraBaseUrl = process.env.CAMERA_BASE_URL || 'http://127.0.0.1:3001';
 const bodyAnalyzerBaseUrl = process.env.BODY_ANALYZER_BASE_URL || inferBaseUrl;
 const inferAnalysisDir = path.join(dataDir, 'analysis');
 const analysisCacheDir = process.env.ANALYSIS_CACHE_DIR || path.join(dataDir, 'service-analysis-cache');
+const expectedInferAnalysisVersion = process.env.INFER_ANALYSIS_VERSION || 'hailo-coach-service7-v2';
 const debugDir = path.join(dataDir, 'debug');
 const inferDebugFrameDir = path.join(debugDir, 'infer-frames');
 
@@ -1093,6 +1094,16 @@ function normalizeInferResult(jobId, status, result) {
   return buildCoachAnalysisPayload(jobId, status, result);
 }
 
+function inferAnalysisVersion(analysis) {
+  if (!analysis || typeof analysis !== 'object') return null;
+  return analysis.analysisVersion || analysis.analysis_version || analysis.meta?.analysisVersion || analysis.meta?.analysis_version || null;
+}
+
+function hasFreshInferAnalysis(cached) {
+  if (!cached || typeof cached !== 'object') return false;
+  return inferAnalysisVersion(cached.analysis) === expectedInferAnalysisVersion;
+}
+
 function buildInferErrorAnalysis(jobId, errorMessage) {
   return {
     jobId,
@@ -2094,7 +2105,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
     Number.isFinite(cachedAgeMs) &&
     cachedAgeMs < 30_000 &&
     (cached.status === 'pending' || cached.status === 'running');
-  if (!force && cached?.status && (cached.status === 'done' || hasFreshInFlightCache)) {
+  if (!force && cached?.status && ((cached.status === 'done' && hasFreshInferAnalysis(cached)) || hasFreshInFlightCache)) {
     return res.json({
       ok: true,
       jobId: providedJobId,
