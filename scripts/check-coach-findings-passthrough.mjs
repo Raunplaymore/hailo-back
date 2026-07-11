@@ -16,10 +16,31 @@ for (const fragment of expectedFragments) {
   );
 }
 
+const requiredFindingFields = [
+  "evidence",
+  "interpretation",
+  "action",
+  "drill",
+  "checkpoint",
+  "caution",
+  "confidence",
+  "theory",
+];
+
+const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+for (const field of requiredFindingFields) {
+  assert(
+    readme.includes(field),
+    `README must document coachFindings field pass-through for ${field}`,
+  );
+}
+
 const forbiddenPatterns = [
   /coachFindings\s*:\s*[^,\n]+\.map\s*\(/,
   /coachFindings\s*:\s*[^,\n]+\.filter\s*\(/,
   /coachFindings\s*:\s*[^,\n]+\.reduce\s*\(/,
+  /coachFindings\s*:\s*[^,\n]+\.pick\s*\(/,
+  /coachFindings\s*:\s*[^,\n]+\.omit\s*\(/,
 ];
 
 for (const pattern of forbiddenPatterns) {
