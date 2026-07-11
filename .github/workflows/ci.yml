@@ -26,6 +26,9 @@ jobs:
       - name: Install dependencies (lockfile check)
         run: npm ci --ignore-scripts
 
+      - name: Run backend checks
+        run: npm run check
+
       - name: Set release name
         id: set_release
         run: echo "release_name=$(date +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"

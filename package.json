@@ -1,4 +1,7 @@
 {
+  "scripts": {
+    "check": "node --check server.js && node scripts/check-coach-findings-passthrough.mjs"
+  },
   "dependencies": {
     "express": "^5.1.0",
     "multer": "^2.0.2"
