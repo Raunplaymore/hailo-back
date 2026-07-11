@@ -111,7 +111,9 @@ GET /api/analyze/session-123
 
 - 프리체크 Abort: 스윙이 아니면 초기에 중단 → `status=failed`, `errorCode=NOT_SWING`, `errorMessage`로 안내. `force=true`로 무시 가능.
 - iPhone `.mov` 지원: 필요 시 ffmpeg로 `.mp4` 리먹스/트랜스코딩 후 분석. 변환/디코딩 실패 시 `errorCode=DECODE_FAILED`.
-- 분석 스키마(현 버전): `ballFlight/impact`(launch angles 등), `swing`(모션 휴리스틱), `coach_summary` 텍스트, `analysisVersion`(`opencv-v1`), `meta`(fps/width/height/durationMs). 일부 값은 검출 실패 시 `null/unknown`.
+- 분석 스키마(현 버전): `hailo-infer`의 service7/fusion 결과를 우선 사용한다. 핵심 필드는 `events`, `metrics.tempo`, `metrics.shaftPlane`, `metrics.backswing`, `metrics.trackingQuality`, `metrics.body`, `metrics.club`, `metrics.fusion`, `coachSummary`, `coachFindings`, `confidence`, `progress`다.
+- `coachFindings`는 객체 배열을 그대로 pass-through한다. 프론트가 `evidence`, `interpretation`, `action`, `drill`, `checkpoint`, `caution`, `theory`를 표시하므로, `pi_service`에서 finding 객체를 필드별로 재작성하거나 필터링하지 않는다.
+- OpenCV 결과(`ballFlight/impact/swing`, `analysisVersion=opencv-v1`)는 레거시/폴백 경로로만 해석한다. 일부 값은 검출 실패 시 `null/unknown`.
 
 ## OpenCV 워커
 
