@@ -590,6 +590,23 @@ async function readJsonFile(filePath) {
   }
 }
 
+async function hydrateOverlayFromBodyArtifact(analysis, bodyPath) {
+  if (!analysis || analysis.overlay || !bodyPath) return analysis;
+  const body = await readJsonFile(bodyPath);
+  const frames = Array.isArray(body?.frames) ? body.frames : [];
+  const poseFrames = frames
+    .filter((frame) => frame?.keypoints && typeof frame.keypoints === 'object')
+    .map((frame, index) => ({
+      timeMs: Number(frame.timeMs ?? index * 33.333),
+      frame: Number(frame.frameIndex ?? index),
+      keypoints: frame.keypoints,
+    }))
+    .filter((frame) => Number.isFinite(frame.timeMs));
+  if (!poseFrames.length) return analysis;
+  analysis.overlay = { coordinateSpace: 'normalized', poseFrames, clubFrames: [] };
+  return analysis;
+}
+
 function resolveDebugMetaPath(jobId, variant) {
   if (variant === 'debug') {
     const debugMetaPath = resolveMetaPath(path.join(metaDir, `${jobId}.debug.meta.json`), jobId);
@@ -2283,7 +2300,7 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
   const diskBodyPath = bodyArtifactPath(jobId);
   const diskBodyExists = typeof diskBodyPath === 'string' && fs.existsSync(diskBodyPath);
   const cachedStatus = cached?.status;
-  const cachedAnalysis = cached?.analysis || null;
+  let cachedAnalysis = cached?.analysis || null;
   const cachedProgress = cached?.progress || null;
   const cachedMetaPath =
     cachedProgress?.metaPath || cached?.metaPath || shotProgress?.metaPath || shotMetadata?.metaPath || null;
@@ -2292,6 +2309,7 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
     shotProgress?.bodyPath ||
     shotMetadata?.bodyPath ||
     (diskBodyExists ? diskBodyPath : null);
+  cachedAnalysis = await hydrateOverlayFromBodyArtifact(cachedAnalysis, cachedBodyPath);
   const cachedClubPath = cachedProgress?.clubPath || shotProgress?.clubPath || cachedMetaPath || null;
   const cachedFusionPath = cachedProgress?.fusionPath || shotProgress?.fusionPath || null;
   const cachedDetail = {
@@ -2366,6 +2384,7 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
       const resultRes = await inferFetchJson(resultUrl, { timeoutMs: 3000 });
       if (resultRes.ok) {
         analysis = normalizeInferResult(jobId, mappedStatus, resultRes.json);
+        await hydrateOverlayFromBodyArtifact(analysis, cachedBodyPath);
         const resultSucceeded = analysis?.status === 'succeeded' && analysis?.errorCode == null;
         const nextStatus = resultSucceeded ? 'done' : mappedStatus;
         progress = buildGroupedProgress(resultSucceeded ? 'fusion_succeeded' : 'failed', {
