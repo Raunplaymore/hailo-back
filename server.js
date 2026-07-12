@@ -676,6 +676,41 @@ function normalizeDebugDetection(det) {
   };
 }
 
+const DEBUG_TRACK_VALIDATION = {
+  golf_ball: { maxArea: 0.012, maxWidth: 0.14, maxHeight: 0.14 },
+  club_head: { maxArea: 0.02, maxWidth: 0.18, maxHeight: 0.18, maxWristDistance: 0.32 },
+  club_handle: { maxArea: 0.06, maxWidth: 0.22, maxHeight: 0.18, maxWristDistance: 0.22 },
+  club: { maxArea: 0.08, maxWidth: 0.28, maxHeight: 0.22, maxWristDistance: 0.34 },
+};
+
+function debugWristPoints(bodyFrame) {
+  const keypoints = bodyFrame?.keypoints;
+  if (!keypoints || typeof keypoints !== 'object') return [];
+  return ['left_wrist', 'right_wrist']
+    .map((key) => keypoints[key])
+    .filter((point) => Array.isArray(point) && point.length >= 3)
+    .map(([x, y, confidence]) => ({ x: Number(x), y: Number(y), confidence: Number(confidence) }))
+    .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y) && point.confidence >= 0.25);
+}
+
+function validateDebugDetection(det, bodyFrame) {
+  const rule = DEBUG_TRACK_VALIDATION[det?.label];
+  if (!rule) return { accepted: true, reason: null };
+  const [x, y, width, height] = det.bbox;
+  const area = width * height;
+  if (width <= 0 || height <= 0 || area > rule.maxArea || width > rule.maxWidth || height > rule.maxHeight) {
+    return { accepted: false, reason: 'implausible_bbox_size' };
+  }
+  if (!Number.isFinite(rule.maxWristDistance)) return { accepted: true, reason: null };
+  const wrists = debugWristPoints(bodyFrame);
+  if (!wrists.length) return { accepted: false, reason: 'wrist_pose_unavailable' };
+  const centerX = x + width / 2;
+  const centerY = y + height / 2;
+  const wristDistance = Math.min(...wrists.map((wrist) => Math.hypot(centerX - wrist.x, centerY - wrist.y)));
+  if (wristDistance > rule.maxWristDistance) return { accepted: false, reason: 'too_far_from_wrist' };
+  return { accepted: true, reason: null, wristDistance: Number(wristDistance.toFixed(4)) };
+}
+
 async function extractDebugFrameImageByTime(videoPath, outPath, timeMs) {
   if (fs.existsSync(outPath)) return;
   const { ffmpeg } = await ensureFfmpegAvailability();
@@ -2387,6 +2422,26 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
     if (resultUrl) {
       const resultRes = await inferFetchJson(resultUrl, { timeoutMs: 3000 });
       if (resultRes.ok) {
+        const resultStatus = mapInferStatus(resultRes.json?.status || resultRes.json?.state);
+        if (resultStatus === 'running' || resultStatus === 'pending') {
+          progress = buildGroupedProgress('fusion_running', {
+            analysisPath: 'infer',
+            metaPath: cachedMetaPath,
+            bodyPath: cachedBodyPath,
+            clubPath: cachedClubPath,
+            fusionPath: cachedFusionPath,
+            message: 'infer 결과를 준비 중입니다.',
+            detail: cachedDetail,
+          });
+          writeAnalysisCache(jobId, {
+            status: 'running',
+            analysis: cachedAnalysis,
+            errorCode: null,
+            errorMessage: null,
+            progress,
+          });
+          return { status: 'running', analysis: cachedAnalysis, progress };
+        }
         analysis = normalizeInferResult(jobId, mappedStatus, resultRes.json);
         await hydrateOverlayFromBodyArtifact(analysis, cachedBodyPath);
         const resultSucceeded = analysis?.status === 'succeeded' && analysis?.errorCode == null;
@@ -2749,6 +2804,7 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
   const selected = selectDebugFrames(frames, limit);
   const debugFrames = [];
   const labelCounts = {};
+  const rejectedLabelCounts = {};
   for (const { frame, index } of selected) {
     const timeMs = frameTimeMs(frame, index, meta?.fps);
     const frameIndex = Number(frame?.frame ?? frame?.frameIndex ?? index);
@@ -2756,10 +2812,18 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
     const imageName = `frame_${String(index).padStart(5, '0')}_n${String(safeFrameIndex).padStart(5, '0')}_${String(timeMs).padStart(6, '0')}.jpg`;
     const imagePath = path.join(jobFrameDir, imageName);
     await extractDebugFrameImage(videoPath, imagePath, { timeMs, frameIndex: safeFrameIndex });
-    const detections = (Array.isArray(frame?.detections) ? frame.detections : [])
+    const bodyFrame = bodyFrameByIndex.get(safeFrameIndex) || nearestBodyFrame(safeFrameIndex);
+    const rawDetections = (Array.isArray(frame?.detections) ? frame.detections : [])
       .map(normalizeDebugDetection)
       .filter(Boolean);
-    const bodyFrame = bodyFrameByIndex.get(safeFrameIndex) || nearestBodyFrame(safeFrameIndex);
+    const rejectedDetections = [];
+    const detections = rawDetections.filter((det) => {
+      const validation = validateDebugDetection(det, bodyFrame);
+      if (validation.accepted) return true;
+      rejectedDetections.push({ ...det, rejectionReason: validation.reason });
+      rejectedLabelCounts[det.label] = (rejectedLabelCounts[det.label] || 0) + 1;
+      return false;
+    });
     detections.forEach((det) => {
       labelCounts[det.label] = (labelCounts[det.label] || 0) + 1;
     });
@@ -2769,6 +2833,8 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
       timeMs,
       imageUrl: `/debug/infer-frames/${encodeURIComponent(jobId)}/${encodeURIComponent(imageName)}`,
       detections,
+      rawDetectionCount: rawDetections.length,
+      rejectedDetections,
       keypoints: bodyFrame?.keypoints || null,
     });
   }
@@ -2796,6 +2862,7 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
       wristFrames: bodyArtifact?.debug?.wristFrames ?? null,
     },
     labelCounts,
+    rejectedLabelCounts,
     frames: debugFrames,
   });
 });
