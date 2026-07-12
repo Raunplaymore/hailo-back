@@ -998,6 +998,7 @@ function buildCoachAnalysisPayload(jobId, status, result) {
     coachSummary: result?.coachSummary ?? result?.coach_summary ?? [],
     coachFindings: result?.coachFindings ?? result?.coach_findings ?? result?.debug?.coachFindings ?? [],
     confidence: result?.confidence ?? null,
+    overlay: result?.overlay ?? null,
     meta: result?.meta ?? null,
     progress: result?.progress ?? null,
   };
@@ -1082,6 +1083,7 @@ function normalizeInferResult(jobId, status, result) {
       coachSummary: result.coachSummary ?? result.coach_summary ?? [],
       coachFindings: result.coachFindings ?? result.coach_findings ?? result.debug?.coachFindings ?? [],
       confidence: result.confidence ?? null,
+      overlay: result.overlay ?? null,
       meta: result.meta ?? null,
       debug: result.debug ?? null,
       pending: result.pending || DEFAULT_PENDING_ITEMS,
