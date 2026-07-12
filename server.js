@@ -636,11 +636,13 @@ function resolveDebugVideoPath(jobId) {
 }
 
 function frameTimeMs(frame, index, fps) {
-  const direct = Number(frame?.t ?? frame?.timeMs ?? frame?.timestampMs);
-  if (Number.isFinite(direct)) return Math.max(0, Math.round(direct));
   const frameIndex = Number(frame?.frame ?? frame?.frameIndex ?? index);
   const safeFps = Number.isFinite(Number(fps)) && Number(fps) > 0 ? Number(fps) : 30;
-  return Math.max(0, Math.round((frameIndex * 1000) / safeFps));
+  if (Number.isFinite(frameIndex) && frameIndex >= 0) {
+    return Math.max(0, Math.round((frameIndex * 1000) / safeFps));
+  }
+  const direct = Number(frame?.t ?? frame?.timeMs ?? frame?.timestampMs);
+  return Number.isFinite(direct) ? Math.max(0, Math.round(direct)) : 0;
 }
 
 function selectDebugFrames(frames, limit) {
