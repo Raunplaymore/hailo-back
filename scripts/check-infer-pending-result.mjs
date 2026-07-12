@@ -5,11 +5,16 @@ const source = await readFile(new URL("../server.js", import.meta.url), "utf8");
 
 for (const fragment of [
   "const resultStatus = mapInferStatus(resultRes.json?.status || resultRes.json?.state);",
-  "if (resultStatus === 'running' || resultStatus === 'pending')",
+  "if ((resultStatus === 'running' || resultStatus === 'pending') && mappedStatus !== 'failed')",
   "message: 'infer 결과를 준비 중입니다.'",
   "return { status: 'running', analysis: cachedAnalysis, progress };",
 ]) {
   assert(source.includes(fragment), `pending infer-result guard missing: ${fragment}`);
 }
+
+assert(
+  source.indexOf("mappedStatus !== 'failed'") < source.indexOf("return { status: 'running', analysis: cachedAnalysis, progress };"),
+  "failed infer status must not be downgraded to running by a pending result placeholder",
+);
 
 console.log("infer pending-result guard check passed");

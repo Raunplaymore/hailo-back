@@ -2424,7 +2424,7 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
       const resultRes = await inferFetchJson(resultUrl, { timeoutMs: 3000 });
       if (resultRes.ok) {
         const resultStatus = mapInferStatus(resultRes.json?.status || resultRes.json?.state);
-        if (resultStatus === 'running' || resultStatus === 'pending') {
+        if ((resultStatus === 'running' || resultStatus === 'pending') && mappedStatus !== 'failed') {
           progress = buildGroupedProgress('fusion_running', {
             analysisPath: 'infer',
             metaPath: cachedMetaPath,
