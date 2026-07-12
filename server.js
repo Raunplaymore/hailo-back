@@ -1074,8 +1074,9 @@ function hasUsableInferMetrics(result) {
     ['address', 'top', 'impact', 'finish', 'addressMs', 'topMs', 'impactMs', 'finishMs'].some(
       (key) => events[key] !== null && events[key] !== undefined,
     );
+  const eventsWithheldForQuality = result.eventValidation?.status === 'withheld';
   return Boolean(
-    hasEvent &&
+    (hasEvent || eventsWithheldForQuality) &&
       (metrics.tempo ||
         metrics.swingPlane ||
         metrics.impactStability ||

@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "check": "node --check server.js && node scripts/check-coach-findings-passthrough.mjs && node scripts/check-infer-pending-result.mjs && node scripts/check-debug-detection-filter.mjs && node scripts/check-debug-frame-timeline.mjs"
+    "check": "node --check server.js && node scripts/check-coach-findings-passthrough.mjs && node scripts/check-infer-pending-result.mjs && node scripts/check-debug-detection-filter.mjs && node scripts/check-debug-frame-timeline.mjs && node scripts/check-withheld-infer-result.mjs"
   },
   "dependencies": {
     "express": "^5.1.0",
