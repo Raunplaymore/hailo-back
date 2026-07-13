@@ -33,7 +33,7 @@ const analysisCacheDir = process.env.ANALYSIS_CACHE_DIR || path.join(dataDir, 's
 const nasDeletionCursorPath = path.join(dataDir, 'nas-deletion-cursor.json');
 // Keep this contract aligned with hailo-infer's emitted result version. A stale
 // expectation silently bypasses completed-cache reuse and can submit duplicate work.
-const expectedInferAnalysisVersion = process.env.INFER_ANALYSIS_VERSION || 'hailo-coach-service7-v12';
+const expectedInferAnalysisVersion = process.env.INFER_ANALYSIS_VERSION || 'hailo-coach-service7-v13';
 const debugDir = path.join(dataDir, 'debug');
 const inferDebugFrameDir = path.join(debugDir, 'infer-frames');
 const nasArchive = createNasArchive({
