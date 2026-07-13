@@ -56,15 +56,25 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
     return { artifact, filename: archiveFilename, originalFilename: path.basename(filePath), size: stat.size };
   }
 
-  async function uploadJson(jobId, target, payload) {
+async function uploadJson(jobId, target, payload) {
     await request(`/v1/jobs/${encodeURIComponent(jobId)}/${target}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-  }
+}
 
-  async function archive({ jobId, status, shot, cache, artifacts }) {
+function missingVideoError() {
+  const error = new Error('Source video is no longer available on the Raspberry Pi');
+  error.code = 'VIDEO_UNAVAILABLE';
+  return error;
+}
+
+async function archive({ jobId, status, shot, cache, artifacts }) {
+    const videoArtifact = artifacts.find(({ artifact }) => artifact === 'video');
+    if (!videoArtifact?.filePath || !fs.existsSync(videoArtifact.filePath)) {
+      throw missingVideoError();
+    }
     const uploaded = [];
     for (const { artifact, filePath } of artifacts) {
       if (!filePath || !fs.existsSync(filePath)) continue;
@@ -83,7 +93,7 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
       progress: cache?.progress || null,
       artifacts: uploaded,
     });
-    return { archivedAt, artifacts: uploaded };
+    return { archivedAt, artifacts: uploaded, videoStored: uploaded.some((artifact) => artifact.artifact === 'video') };
   }
 
   function schedule(payload, attempt = 0) {
@@ -109,13 +119,15 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
           error: null,
           archivedAt: result.archivedAt,
           artifactCount: result.artifacts.length,
+          videoStored: result.videoStored,
           updatedAt: new Date().toISOString(),
         });
         logger.info(`[nas-archive] archived ${payload.jobId}`);
       } catch (error) {
         const errorMessage = String(error.message || 'NAS archive failed').slice(0, 240);
         logger.warn(`[nas-archive] ${payload.jobId} attempt ${attemptNumber} failed: ${errorMessage}`);
-        if (attemptNumber < MAX_ATTEMPTS) {
+        const nonRetryable = error.code === 'VIDEO_UNAVAILABLE';
+        if (!nonRetryable && attemptNumber < MAX_ATTEMPTS) {
           const delayMs = 5_000 * attemptNumber;
           reportStatus(payload, {
             state: 'retrying',
@@ -131,6 +143,7 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
             attempt: attemptNumber,
             retryAt: null,
             error: errorMessage,
+            errorCode: error.code || null,
             updatedAt: new Date().toISOString(),
           });
         }

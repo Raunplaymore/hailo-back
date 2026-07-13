@@ -962,6 +962,12 @@ function updateNasArchiveStatus(jobId, patch) {
   );
 }
 
+function isNasArchiveComplete(archive) {
+  if (!archive || archive.state !== 'stored') return false;
+  // artifactCount is retained only as a migration fallback for the first sync-status release.
+  return archive.videoStored === true || Number(archive.artifactCount) >= 5;
+}
+
 function queueNasArchive(cache, { force = false } = {}) {
   if (!['done', 'failed'].includes(cache?.status) || !cache?.jobId) return false;
   if (!nasArchive.enabled) {
@@ -973,7 +979,7 @@ function queueNasArchive(cache, { force = false } = {}) {
     return false;
   }
   const current = cache.nasArchive && typeof cache.nasArchive === 'object' ? cache.nasArchive : {};
-  if (!force && ['stored', 'pending', 'uploading', 'retrying'].includes(current.state)) return false;
+  if (!force && (isNasArchiveComplete(current) || ['pending', 'uploading', 'retrying'].includes(current.state))) return false;
   const shot = shotStore.getShotByJobId(cache.jobId);
   const metaPath = cache.metaPath || cache.progress?.metaPath || shot?.metadata?.metaPath;
   const bodyPath = cache.progress?.bodyPath || bodyArtifactPath(cache.jobId);
@@ -1015,7 +1021,7 @@ function resumeNasArchiveQueue() {
     if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
     const jobId = path.basename(entry.name, '.json');
     const cache = readAnalysisCache(jobId);
-    if (!cache || !['done', 'failed'].includes(cache.status) || cache.nasArchive?.state === 'stored') continue;
+    if (!cache || !['done', 'failed'].includes(cache.status) || isNasArchiveComplete(cache.nasArchive)) continue;
     queueNasArchive(cache);
   }
 }
@@ -2671,7 +2677,7 @@ app.post('/api/archive/:jobId/retry', (req, res) => {
     return res.status(503).json({ ok: false, message: 'NAS archive is not configured' });
   }
   const state = cache.nasArchive?.state;
-  if (state === 'stored') {
+  if (isNasArchiveComplete(cache.nasArchive)) {
     return res.status(409).json({ ok: false, message: 'NAS archive is already complete' });
   }
   if (['pending', 'uploading', 'retrying'].includes(state)) {
