@@ -31,7 +31,9 @@ const bodyAnalyzerBaseUrl = process.env.BODY_ANALYZER_BASE_URL || inferBaseUrl;
 const inferAnalysisDir = path.join(dataDir, 'analysis');
 const analysisCacheDir = process.env.ANALYSIS_CACHE_DIR || path.join(dataDir, 'service-analysis-cache');
 const nasDeletionCursorPath = path.join(dataDir, 'nas-deletion-cursor.json');
-const expectedInferAnalysisVersion = process.env.INFER_ANALYSIS_VERSION || 'hailo-coach-service7-v10';
+// Keep this contract aligned with hailo-infer's emitted result version. A stale
+// expectation silently bypasses completed-cache reuse and can submit duplicate work.
+const expectedInferAnalysisVersion = process.env.INFER_ANALYSIS_VERSION || 'hailo-coach-service7-v12';
 const debugDir = path.join(dataDir, 'debug');
 const inferDebugFrameDir = path.join(debugDir, 'infer-frames');
 const nasArchive = createNasArchive({
@@ -942,7 +944,12 @@ function writeAnalysisCache(jobId, cache, { scheduleArchive = true } = {}) {
     ...cache,
     updatedAt: new Date().toISOString(),
   };
-  fs.writeFileSync(cachePath, JSON.stringify(payload, null, 2), 'utf8');
+  // A poller, upload request, and NAS status callback may all update this file.
+  // Atomic replacement prevents a reboot or concurrent reader from observing
+  // partial JSON while preserving the existing simple JSON-cache contract.
+  const temporaryPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(temporaryPath, JSON.stringify(payload, null, 2), 'utf8');
+  fs.renameSync(temporaryPath, cachePath);
   if (scheduleArchive) queueNasArchive(payload);
   return payload;
 }
@@ -1023,6 +1030,33 @@ function resumeNasArchiveQueue() {
     const cache = readAnalysisCache(jobId);
     if (!cache || !['done', 'failed'].includes(cache.status) || isNasArchiveComplete(cache.nasArchive)) continue;
     queueNasArchive(cache);
+  }
+}
+
+let analysisReconcileInProgress = false;
+async function reconcileAnalysisQueue() {
+  if (analysisReconcileInProgress) return;
+  analysisReconcileInProgress = true;
+  try {
+    const entries = fs.readdirSync(analysisCacheDir, { withFileTypes: true });
+    const pendingJobIds = entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+      .map((entry) => path.basename(entry.name, '.json'))
+      .filter((jobId) => {
+        const cache = readAnalysisCache(jobId);
+        return cache && ['queued', 'pending', 'running'].includes(cache.status);
+      });
+
+    for (const jobId of pendingJobIds) {
+      // fetchInferJobPayload is the canonical result normalizer. When infer has
+      // finished it writes the terminal cache and writeAnalysisCache schedules
+      // the NAS archive, independent of any browser polling this endpoint.
+      await fetchInferJobPayload(jobId, { includeResult: false });
+    }
+  } catch (error) {
+    console.warn(`[analysis-reconcile] unable to reconcile queued jobs: ${error.message}`);
+  } finally {
+    analysisReconcileInProgress = false;
   }
 }
 
@@ -3185,7 +3219,10 @@ app.use((err, _req, res, _next) => {
 app.listen(PORT, () => {
   console.log(`Swing server listening on port ${PORT}`);
   setImmediate(resumeNasArchiveQueue);
+  setImmediate(reconcileAnalysisQueue);
   setImmediate(syncNasDeletions);
+  const analysisReconcileTimer = setInterval(reconcileAnalysisQueue, 10 * 1000);
+  analysisReconcileTimer.unref?.();
   const nasDeletionTimer = setInterval(syncNasDeletions, 5 * 60 * 1000);
   nasDeletionTimer.unref?.();
 });
