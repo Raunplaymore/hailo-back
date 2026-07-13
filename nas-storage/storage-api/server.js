@@ -87,12 +87,18 @@ const server = http.createServer(async (request, response) => {
     }
     if (!isAuthorized(request)) return send(response, 401, { ok: false, error: 'unauthorized' });
 
+    const jobMatch = request.url?.match(/^\/v1\/jobs\/([a-zA-Z0-9._-]+)$/);
     const manifestMatch = request.url?.match(/^\/v1\/jobs\/([a-zA-Z0-9._-]+)\/manifest$/);
     const artifactMatch = request.url?.match(/^\/v1\/jobs\/([a-zA-Z0-9._-]+)\/artifacts\/([a-z-]+)(?:\/([a-zA-Z0-9._-]+))?$/);
-    const match = manifestMatch || artifactMatch;
+    const match = jobMatch || manifestMatch || artifactMatch;
     if (!match) return send(response, 404, { ok: false, error: 'not_found' });
     const jobId = safeSegment(match[1]);
     if (!jobId) return send(response, 400, { ok: false, error: 'invalid_job_id' });
+
+    if (request.method === 'DELETE' && jobMatch) {
+      await fs.promises.rm(jobDirectory(jobId), { recursive: true, force: true });
+      return send(response, 200, { ok: true, jobId, deleted: true });
+    }
 
     if (request.method === 'GET' && manifestMatch) {
       return sendFile(response, path.join(jobDirectory(jobId), 'manifest.json'), 'application/json');

@@ -963,9 +963,7 @@ function updateNasArchiveStatus(jobId, patch) {
 }
 
 function isNasArchiveComplete(archive) {
-  if (!archive || archive.state !== 'stored') return false;
-  // artifactCount is retained only as a migration fallback for the first sync-status release.
-  return archive.videoStored === true || Number(archive.artifactCount) >= 5;
+  return archive?.state === 'stored';
 }
 
 function queueNasArchive(cache, { force = false } = {}) {
@@ -3065,20 +3063,48 @@ app.post('/api/debug/infer/:jobId/debug-meta', async (req, res) => {
   });
 });
 
-// Delete a file by name
-app.delete('/api/files/:name', async (req, res) => {
-  const resolvedUpload = path.resolve(uploadDir);
-  const target = path.resolve(uploadDir, req.params.name);
+async function removeIfPresent(filePath) {
+  if (!filePath) return;
+  try {
+    await fs.promises.rm(filePath, { recursive: true, force: true });
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
 
-  // Prevent path traversal outside uploadDir
-  if (!target.startsWith(`${resolvedUpload}${path.sep}`)) {
+async function removeJobArtifacts(jobId, cache) {
+  if (!isSafeJobId(jobId)) return;
+  const metaPaths = [
+    resolveMetaPath(cache?.metaPath, jobId),
+    resolveMetaPath(cache?.progress?.metaPath, jobId),
+    resolveMetaPath(null, jobId),
+    resolveMetaPath(path.join(metaDir, `${jobId}.debug.meta.json`), jobId),
+  ];
+  await Promise.all([
+    removeIfPresent(analysisCachePath(jobId)),
+    removeIfPresent(inferAnalysisPath(jobId)),
+    removeIfPresent(bodyArtifactPath(jobId)),
+    removeIfPresent(path.join(inferDebugFrameDir, jobId)),
+    ...metaPaths.map(removeIfPresent),
+  ]);
+}
+
+// Delete the uploaded video and every Pi/NAS artifact associated with its job.
+app.delete('/api/files/:name', async (req, res) => {
+  const target = resolveUploadPath(req.params.name);
+  if (!target) {
     return res.status(400).json({ ok: false, message: 'Invalid file path' });
   }
 
   try {
+    const shot = shotStore.getShotByMediaName(req.params.name);
+    const jobId = shot?.jobId || path.basename(req.params.name, path.extname(req.params.name));
+    const cache = readAnalysisCache(jobId);
+    if (nasArchive.enabled) await nasArchive.deleteJob(jobId);
     await fs.promises.unlink(target);
+    await removeJobArtifacts(jobId, cache);
     shotStore.removeShotByFilename(req.params.name);
-    res.json({ ok: true });
+    res.json({ ok: true, jobId });
   } catch (err) {
     if (err.code === 'ENOENT') {
       return res.status(404).json({ ok: false, message: 'File not found' });

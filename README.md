@@ -167,6 +167,11 @@ NAS_ARCHIVE_TOKEN=<ARCHIVE_TOKEN과 동일한 값>
 `GET /v1/jobs/<jobId>/artifacts/<artifact>/<filename>`으로 읽을 수 있다. 파일명은 manifest의
 `artifacts` 목록에서 확인한다.
 
+Pi의 원본 영상이 먼저 정리된 job은 분석·메타만 보관되며 `nasArchive.videoStored: false`로 표시된다.
+웹에서 영상을 삭제하면 Pi의 해당 job 분석 산출물과 NAS의 동일 job 보관본도 함께 삭제한다. 전체 학습
+데이터 초기화는 GitHub Actions의 **Purge Learning Data**를 수동 실행하고 확인 문구
+`PURGE_LEARNING_DATA`를 입력한다.
+
 ## 한계/주의
 
 - 프로토타입 수준: 공/클럽 검출 실패 시 `null`/신뢰도 낮은 값이 내려올 수 있음.

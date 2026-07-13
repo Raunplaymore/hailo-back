@@ -1,0 +1,35 @@
+name: Purge Learning Data
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type PURGE_LEARNING_DATA to delete Pi videos and analysis artifacts.'
+        required: true
+        type: string
+
+jobs:
+  purge:
+    if: inputs.confirmation == 'PURGE_LEARNING_DATA'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+      - name: Purge Pi learning data only
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PI_HOST }}
+          username: ${{ secrets.PI_USER }}
+          key: ${{ secrets.PI_SSH_KEY }}
+          script: |
+            set -eu
+            find /home/ray/uploads -maxdepth 1 -type f \( -name '*.mp4' -o -name '*.mov' -o -name '*.part' \) -delete
+            find /home/ray/data -mindepth 1 -maxdepth 1 -type d \( -name analysis -o -name body -o -name debug -o -name service-analysis-cache \) -exec rm -rf {} +
+            rm -f /home/ray/data/shots.json
+            find /tmp -maxdepth 1 -type f \( -name '*.meta.json' -o -name '*.debug.meta.json' \) -delete
+            mkdir -p /home/ray/uploads /home/ray/data/analysis /home/ray/data/body /home/ray/data/debug/infer-frames /home/ray/data/service-analysis-cache
+            printf 'uploads='; find /home/ray/uploads -maxdepth 1 -type f | wc -l
+            printf 'cache='; find /home/ray/data/service-analysis-cache -maxdepth 1 -type f | wc -l
