@@ -91,10 +91,14 @@ jobs:
 
       - name: Deploy and activate release on Raspberry Pi
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          NAS_ARCHIVE_URL: ${{ secrets.NAS_ARCHIVE_URL }}
+          NAS_ARCHIVE_TOKEN: ${{ secrets.NAS_ARCHIVE_TOKEN }}
         with:
           host: ${{ secrets.PI_HOST }}
           username: ${{ secrets.PI_USER }}
           key: ${{ secrets.PI_SSH_KEY }}
+          envs: NAS_ARCHIVE_URL,NAS_ARCHIVE_TOKEN
           script: |
             export NVM_DIR="$HOME/.nvm"
             [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"

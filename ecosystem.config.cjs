@@ -17,6 +17,8 @@ module.exports = {
         META_DIR: '/tmp',
         INFER_BASE_URL: 'http://127.0.0.1:3002',
         BODY_ANALYZER_BASE_URL: 'http://127.0.0.1:3002',
+        NAS_ARCHIVE_URL: process.env.NAS_ARCHIVE_URL || '',
+        NAS_ARCHIVE_TOKEN: process.env.NAS_ARCHIVE_TOKEN || '',
       },
       env_production: {
         NODE_ENV: 'production',
@@ -26,6 +28,8 @@ module.exports = {
         META_DIR: '/tmp',
         INFER_BASE_URL: 'http://127.0.0.1:3002',
         BODY_ANALYZER_BASE_URL: 'http://127.0.0.1:3002',
+        NAS_ARCHIVE_URL: process.env.NAS_ARCHIVE_URL || '',
+        NAS_ARCHIVE_TOKEN: process.env.NAS_ARCHIVE_TOKEN || '',
       },
       instances: 1,
       autorestart: true,

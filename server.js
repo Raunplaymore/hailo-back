@@ -12,6 +12,7 @@ const {
 } = require('./analysis/engine');
 const opencvAnalyzer = require('./analyzers/opencvV1');
 const shotStore = require('./store/shotStore');
+const { createNasArchive } = require('./storage/nasArchive');
 
 const app = express();
 const PORT = 3000;
@@ -32,6 +33,11 @@ const analysisCacheDir = process.env.ANALYSIS_CACHE_DIR || path.join(dataDir, 's
 const expectedInferAnalysisVersion = process.env.INFER_ANALYSIS_VERSION || 'hailo-coach-service7-v10';
 const debugDir = path.join(dataDir, 'debug');
 const inferDebugFrameDir = path.join(debugDir, 'infer-frames');
+const nasArchive = createNasArchive({
+  baseUrl: process.env.NAS_ARCHIVE_URL,
+  token: process.env.NAS_ARCHIVE_TOKEN,
+  timeoutMs: Number(process.env.NAS_ARCHIVE_TIMEOUT_MS || 120_000),
+});
 
 // Ensure upload directory exists
 fs.mkdirSync(uploadDir, { recursive: true });
@@ -934,7 +940,28 @@ function writeAnalysisCache(jobId, cache) {
     updatedAt: new Date().toISOString(),
   };
   fs.writeFileSync(cachePath, JSON.stringify(payload, null, 2), 'utf8');
+  queueNasArchive(payload);
   return payload;
+}
+
+function queueNasArchive(cache) {
+  if (!nasArchive.enabled || !['done', 'failed'].includes(cache?.status) || !cache?.jobId) return;
+  const shot = shotStore.getShotByJobId(cache.jobId);
+  const metaPath = cache.metaPath || cache.progress?.metaPath || shot?.metadata?.metaPath;
+  const bodyPath = cache.progress?.bodyPath || bodyArtifactPath(cache.jobId);
+  nasArchive.schedule({
+    jobId: cache.jobId,
+    status: cache.status,
+    shot,
+    cache,
+    artifacts: [
+      { artifact: 'video', filePath: resolveDebugVideoPath(cache.jobId) },
+      { artifact: 'analysis-cache', filePath: analysisCachePath(cache.jobId) },
+      { artifact: 'analysis-result', filePath: inferAnalysisPath(cache.jobId) },
+      { artifact: 'body', filePath: bodyPath },
+      { artifact: 'meta', filePath: metaPath },
+    ],
+  });
 }
 
 function mapInferStatus(status) {

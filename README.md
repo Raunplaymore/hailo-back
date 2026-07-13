@@ -31,6 +31,7 @@ UPLOAD_DIR=/home/ray/uploads DATA_DIR=/home/ray/data node server.js
 - 샷/세션 저장: `DATA_DIR`(기본 `./data`, 운영 `/home/ray/data`)
 - 분석 서비스: `INFER_BASE_URL`(기본 `http://127.0.0.1:3002`)
 - body bootstrap 서비스: `BODY_ANALYZER_BASE_URL`(기본 `http://127.0.0.1:3002`)
+- 선택 NAS 아카이브: `NAS_ARCHIVE_URL`, `NAS_ARCHIVE_TOKEN` (둘 다 설정된 경우만 활성화)
 - 헬스체크: `GET /health/ok.txt`
 - 정적 자산: `client-dist/`를 자동 서빙하며 SPA fallback(`/index.html`)도 포함됨. 별도 프런트 빌드가 있다면 해당 폴더에 산출물 배치.
 
@@ -128,6 +129,27 @@ pm2 save && pm2 startup
 ```
 
 - `ecosystem.config.cjs`에서 `UPLOAD_DIR`, `DATA_DIR`를 운영 경로(`/home/ray/...`)로 지정.
+
+## NAS 아카이브 (선택)
+
+Pi는 분석을 로컬에서 끝낸 뒤, terminal 상태(`done`, `failed`)의 원본 영상과 분석 cache/result/body/meta
+artifact를 NAS storage API로 비동기 전송한다. NAS 연결 또는 전송 실패는 분석 결과에 영향을 주지 않으며,
+전송은 최대 3회 재시도한다.
+
+1. NAS에서 `nas-storage/` 내용을 `/volume1/hailo/compose`로 복사한다.
+2. `.env.example`을 `.env`로 복사하고 Tailscale IP와 강한 `ARCHIVE_TOKEN`을 설정한다.
+3. root 권한으로 `docker compose --env-file .env -f compose.yml up -d --build`를 실행한다.
+4. Pi 배포 환경에 다음 값을 설정한다.
+
+```bash
+NAS_ARCHIVE_URL=http://100.89.166.77:18080
+NAS_ARCHIVE_TOKEN=<ARCHIVE_TOKEN과 동일한 값>
+```
+
+운영 배포는 GitHub Actions의 `NAS_ARCHIVE_URL`, `NAS_ARCHIVE_TOKEN` Actions secret을 PM2 기동 환경으로만
+전달한다. 두 secret이 비어 있으면 아카이브는 비활성화되며 기존 분석은 그대로 동작한다.
+
+아카이브는 NAS의 `/volume1/hailo/jobs/<jobId>/`에 파일과 `manifest.json`을 원자적으로 기록한다.
 
 ## 한계/주의
 

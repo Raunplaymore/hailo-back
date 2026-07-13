@@ -1,0 +1,14 @@
+services:
+  storage-api:
+    build:
+      context: ./storage-api
+    container_name: hailo-storage-api
+    restart: unless-stopped
+    environment:
+      ARCHIVE_ROOT: /archive
+      ARCHIVE_TOKEN: ${ARCHIVE_TOKEN:?Set ARCHIVE_TOKEN in .env}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-4294967296}
+    volumes:
+      - /volume1/hailo:/archive
+    ports:
+      - "${STORAGE_BIND_IP:?Set the NAS Tailscale IP in .env}:${STORAGE_API_PORT:-18080}:8080"

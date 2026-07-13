@@ -1,0 +1,102 @@
+const fs = require('fs');
+const path = require('path');
+
+const TERMINAL_STATUSES = new Set(['done', 'failed']);
+const MAX_ATTEMPTS = 3;
+
+function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = console }) {
+  const origin = String(baseUrl || '').replace(/\/$/, '');
+  const enabled = Boolean(origin && token);
+  const pending = new Set();
+
+  async function request(target, options = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${origin}${target}`, {
+        ...options,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(options.headers || {}),
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(`NAS archive request failed: ${response.status} ${await response.text()}`);
+      }
+      return response;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function uploadFile(jobId, artifact, filePath) {
+    const stat = await fs.promises.stat(filePath);
+    if (!stat.isFile()) return null;
+    const extension = path.extname(filePath).toLowerCase() || '.bin';
+    const archiveFilename = `${artifact}${extension}`;
+    await request(`/v1/jobs/${encodeURIComponent(jobId)}/artifacts/${artifact}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': String(stat.size),
+        'X-Filename': archiveFilename,
+      },
+      body: fs.createReadStream(filePath),
+      duplex: 'half',
+    });
+    return { artifact, filename: archiveFilename, originalFilename: path.basename(filePath), size: stat.size };
+  }
+
+  async function uploadJson(jobId, target, payload) {
+    await request(`/v1/jobs/${encodeURIComponent(jobId)}/${target}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async function archive({ jobId, status, shot, cache, artifacts }) {
+    const uploaded = [];
+    for (const { artifact, filePath } of artifacts) {
+      if (!filePath || !fs.existsSync(filePath)) continue;
+      const result = await uploadFile(jobId, artifact, filePath);
+      if (result) uploaded.push(result);
+    }
+    const archivedShot = shot ? JSON.parse(JSON.stringify(shot)) : null;
+    if (archivedShot?.media) delete archivedShot.media.path;
+    await uploadJson(jobId, 'manifest', {
+      jobId,
+      status,
+      archivedAt: new Date().toISOString(),
+      shot: archivedShot,
+      analysis: cache?.analysis || null,
+      progress: cache?.progress || null,
+      artifacts: uploaded,
+    });
+  }
+
+  function schedule(payload, attempt = 0) {
+    if (!enabled || !payload?.jobId || !TERMINAL_STATUSES.has(payload.status)) return;
+    const key = `${payload.jobId}:${payload.status}`;
+    if (pending.has(key)) return;
+    pending.add(key);
+    setImmediate(async () => {
+      try {
+        await archive(payload);
+        logger.info(`[nas-archive] archived ${payload.jobId}`);
+      } catch (error) {
+        logger.warn(`[nas-archive] ${payload.jobId} attempt ${attempt + 1} failed: ${error.message}`);
+        if (attempt + 1 < MAX_ATTEMPTS) {
+          setTimeout(() => schedule(payload, attempt + 1), 5_000 * (attempt + 1));
+        }
+      } finally {
+        pending.delete(key);
+      }
+    });
+  }
+
+  return { enabled, schedule };
+}
+
+module.exports = { createNasArchive };
