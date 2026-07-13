@@ -22,6 +22,30 @@ function send(response, status, payload) {
   response.end(JSON.stringify(payload));
 }
 
+async function sendFile(response, target, contentType) {
+  let stat;
+  try {
+    stat = await fs.promises.stat(target);
+  } catch (error) {
+    if (error.code === 'ENOENT') return send(response, 404, { ok: false, error: 'not_found' });
+    throw error;
+  }
+
+  if (!stat.isFile()) return send(response, 404, { ok: false, error: 'not_found' });
+  response.writeHead(200, {
+    'Content-Type': contentType,
+    'Content-Length': stat.size,
+    'Cache-Control': 'private, no-store',
+  });
+  fs.createReadStream(target).pipe(response);
+}
+
+function artifactContentType(artifact, filename) {
+  if (artifact === 'video') return 'video/mp4';
+  if (filename.endsWith('.json')) return 'application/json';
+  return 'application/octet-stream';
+}
+
 async function writeBody(request, target, limit) {
   await fs.promises.mkdir(path.dirname(target), { recursive: true });
   const temporary = `${target}.part`;
@@ -63,12 +87,18 @@ const server = http.createServer(async (request, response) => {
     }
     if (!isAuthorized(request)) return send(response, 401, { ok: false, error: 'unauthorized' });
 
-    const match = request.url?.match(/^\/v1\/jobs\/([a-zA-Z0-9._-]+)\/(artifacts\/([a-z-]+)|manifest)$/);
+    const manifestMatch = request.url?.match(/^\/v1\/jobs\/([a-zA-Z0-9._-]+)\/manifest$/);
+    const artifactMatch = request.url?.match(/^\/v1\/jobs\/([a-zA-Z0-9._-]+)\/artifacts\/([a-z-]+)(?:\/([a-zA-Z0-9._-]+))?$/);
+    const match = manifestMatch || artifactMatch;
     if (!match) return send(response, 404, { ok: false, error: 'not_found' });
     const jobId = safeSegment(match[1]);
     if (!jobId) return send(response, 400, { ok: false, error: 'invalid_job_id' });
 
-    if (request.method === 'PUT' && match[2] === 'manifest') {
+    if (request.method === 'GET' && manifestMatch) {
+      return sendFile(response, path.join(jobDirectory(jobId), 'manifest.json'), 'application/json');
+    }
+
+    if (request.method === 'PUT' && manifestMatch) {
       const manifest = await readJson(request);
       await fs.promises.mkdir(jobDirectory(jobId), { recursive: true });
       const manifestPath = path.join(jobDirectory(jobId), 'manifest.json');
@@ -77,11 +107,17 @@ const server = http.createServer(async (request, response) => {
       return send(response, 200, { ok: true, jobId });
     }
 
-    const artifact = match[3];
+    const artifact = artifactMatch?.[2];
+    const filename = artifactMatch?.[3] ? safeSegment(artifactMatch[3]) : null;
+    if (request.method === 'GET' && validArtifacts.has(artifact)) {
+      if (!filename) return send(response, 400, { ok: false, error: 'filename_required' });
+      return sendFile(response, path.join(jobDirectory(jobId), artifact, filename), artifactContentType(artifact, filename));
+    }
+
     if (request.method === 'PUT' && validArtifacts.has(artifact)) {
-      const filename = safeSegment(String(request.headers['x-filename'] || ''));
-      if (!filename) return send(response, 400, { ok: false, error: 'invalid_filename' });
-      const bytes = await writeBody(request, path.join(jobDirectory(jobId), artifact, filename), maxUploadBytes);
+      const uploadFilename = safeSegment(String(request.headers['x-filename'] || ''));
+      if (!uploadFilename) return send(response, 400, { ok: false, error: 'invalid_filename' });
+      const bytes = await writeBody(request, path.join(jobDirectory(jobId), artifact, uploadFilename), maxUploadBytes);
       return send(response, 200, { ok: true, jobId, artifact, bytes });
     }
 

@@ -137,9 +137,21 @@ artifact를 NAS storage API로 비동기 전송한다. NAS 연결 또는 전송 
 전송은 최대 3회 재시도한다.
 
 1. NAS에서 `nas-storage/` 내용을 `/volume1/hailo/compose`로 복사한다.
-2. `.env.example`을 `.env`로 복사하고 Tailscale IP와 강한 `ARCHIVE_TOKEN`을 설정한다.
+2. `.env.example`을 `.env`로 복사하고 강한 `ARCHIVE_TOKEN`을 설정한다. `STORAGE_BIND_HOST`는
+   반드시 `127.0.0.1`로 유지한다.
 3. root 권한으로 `docker compose --env-file .env -f compose.yml up -d --build`를 실행한다.
-4. Pi 배포 환경에 다음 값을 설정한다.
+4. DSM의 Tailscale은 userspace networking 모드이므로, host IP에 Docker 포트를 bind하지 않는다.
+   root 권한으로 아래 Serve 규칙을 한 번 등록한다. 이 규칙은 reboot 뒤에도 유지되며 NAS 외부 LAN에는
+   포트를 열지 않고 tailnet에서만 raw TCP를 `127.0.0.1:18080`으로 전달한다.
+
+```bash
+/volume1/@appstore/Tailscale/bin/tailscale \
+  --socket=/volume1/@appdata/Tailscale/tailscaled.sock \
+  serve --bg --tcp=18080 tcp://127.0.0.1:18080
+```
+
+5. Pi 배포 환경에 다음 값을 설정한다. Tailscale 터널 구간은 암호화되고, API는 별도 Bearer token도
+   검증한다.
 
 ```bash
 NAS_ARCHIVE_URL=http://100.89.166.77:18080
@@ -150,6 +162,9 @@ NAS_ARCHIVE_TOKEN=<ARCHIVE_TOKEN과 동일한 값>
 전달한다. 두 secret이 비어 있으면 아카이브는 비활성화되며 기존 분석은 그대로 동작한다.
 
 아카이브는 NAS의 `/volume1/hailo/jobs/<jobId>/`에 파일과 `manifest.json`을 원자적으로 기록한다.
+보관 결과는 Bearer token을 포함해 `GET /v1/jobs/<jobId>/manifest`,
+`GET /v1/jobs/<jobId>/artifacts/<artifact>/<filename>`으로 읽을 수 있다. 파일명은 manifest의
+`artifacts` 목록에서 확인한다.
 
 ## 한계/주의
 

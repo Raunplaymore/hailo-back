@@ -11,4 +11,6 @@ services:
     volumes:
       - /volume1/hailo:/archive
     ports:
-      - "${STORAGE_BIND_IP:?Set the NAS Tailscale IP in .env}:${STORAGE_API_PORT:-18080}:8080"
+      # DSM Tailscale runs in userspace-networking mode, so this must stay loopback-only.
+      # Tailscale Serve exposes it privately to the tailnet.
+      - "${STORAGE_BIND_HOST:-127.0.0.1}:${STORAGE_API_PORT:-18080}:8080"
