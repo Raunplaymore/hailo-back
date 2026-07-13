@@ -8,8 +8,13 @@ services:
       ARCHIVE_ROOT: /archive
       ARCHIVE_TOKEN: ${ARCHIVE_TOKEN:?Set ARCHIVE_TOKEN in .env}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-4294967296}
+      LIBRARY_PASSWORD: ${LIBRARY_PASSWORD:-}
+      LIBRARY_SESSION_SECRET: ${LIBRARY_SESSION_SECRET:-}
+      LIBRARY_COOKIE_SECURE: ${LIBRARY_COOKIE_SECURE:-true}
+      WEB_ROOT: /web
     volumes:
       - /volume1/hailo:/archive
+      - /volume1/hailo/web:/web:ro
     ports:
       # DSM Tailscale runs in userspace-networking mode, so this must stay loopback-only.
       # Tailscale Serve exposes it privately to the tailnet.

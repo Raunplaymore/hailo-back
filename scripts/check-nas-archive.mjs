@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 const archiveSource = await readFile('storage/nasArchive.js', 'utf8');
 const serverSource = await readFile('server.js', 'utf8');
 const storageApiSource = await readFile('nas-storage/storage-api/server.js', 'utf8');
+const librarySource = await readFile('nas-storage/storage-api/library.js', 'utf8');
 const composeSource = await readFile('nas-storage/compose.yml', 'utf8');
 const workflowSource = await readFile('.github/workflows/ci.yml', 'utf8');
 
@@ -27,6 +28,12 @@ assert.match(storageApiSource, /validArtifacts/, 'NAS API must restrict artifact
 assert.match(storageApiSource, /GET' && manifestMatch/, 'NAS API must provide an authenticated manifest retrieval route.');
 assert.match(storageApiSource, /GET' && validArtifacts\.has\(artifact\)/, 'NAS API must provide authenticated artifact retrieval.');
 assert.match(storageApiSource, /request\.method === 'DELETE' && jobMatch/, 'NAS API must support authenticated whole-job deletion.');
+assert.match(storageApiSource, /\/v1\/deletions/, 'NAS API must expose an authenticated tombstone feed for Pi cleanup.');
+assert.match(storageApiSource, /job_deleted/, 'NAS API must reject uploads for tombstoned jobs.');
+assert.match(librarySource, /\/api\/auth\/login/, 'NAS library must provide a browser login endpoint.');
+assert.match(librarySource, /\/api\/library\/jobs/, 'NAS library must provide authenticated job listing and detail endpoints.');
+assert.match(librarySource, /Accept-Ranges': 'bytes'/, 'NAS library must support Range video streaming.');
+assert.match(librarySource, /HttpOnly/, 'NAS library authentication must use an HttpOnly cookie.');
 assert.match(storageApiSource, /Cache-Control': 'private, no-store'/, 'NAS retrieval must not be cached by intermediaries.');
 assert.match(composeSource, /STORAGE_BIND_HOST:-127\.0\.0\.1/, 'NAS storage must bind only to loopback before Tailscale Serve.');
 assert.match(workflowSource, /envs: NAS_ARCHIVE_URL,NAS_ARCHIVE_TOKEN/, 'Deployment must pass NAS credentials only as runtime environment variables.');

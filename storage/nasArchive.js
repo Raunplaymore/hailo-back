@@ -4,7 +4,7 @@ const path = require('path');
 const TERMINAL_STATUSES = new Set(['done', 'failed']);
 const MAX_ATTEMPTS = 3;
 
-function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = console, onStatus } = {}) {
+function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = console, onStatus, onDeleted } = {}) {
   const origin = String(baseUrl || '').replace(/\/$/, '');
   const enabled = Boolean(origin && token);
   const pending = new Set();
@@ -30,7 +30,11 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
         signal: controller.signal,
       });
       if (!response.ok) {
-        throw new Error(`NAS archive request failed: ${response.status} ${await response.text()}`);
+        const body = await response.text();
+        const error = new Error(`NAS archive request failed: ${response.status} ${body}`);
+        error.status = response.status;
+        if (response.status === 410 && body.includes('job_deleted')) error.code = 'JOB_DELETED';
+        throw error;
       }
       return response;
     } finally {
@@ -116,6 +120,10 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
       } catch (error) {
         const errorMessage = String(error.message || 'NAS archive failed').slice(0, 240);
         logger.warn(`[nas-archive] ${payload.jobId} attempt ${attemptNumber} failed: ${errorMessage}`);
+        if (error.code === 'JOB_DELETED') {
+          onDeleted?.(payload.jobId);
+          return;
+        }
         if (attemptNumber < MAX_ATTEMPTS) {
           const delayMs = 5_000 * attemptNumber;
           reportStatus(payload, {
@@ -149,7 +157,13 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
     return response.json();
   }
 
-  return { enabled, schedule, deleteJob, isPending: (jobId, status) => pending.has(`${jobId}:${status}`) };
+  async function listDeletions(after = '') {
+    if (!enabled) return { ok: true, deletions: [], cursor: after, skipped: true };
+    const response = await request(`/v1/deletions?after=${encodeURIComponent(after)}`);
+    return response.json();
+  }
+
+  return { enabled, schedule, deleteJob, listDeletions, isPending: (jobId, status) => pending.has(`${jobId}:${status}`) };
 }
 
 module.exports = { createNasArchive };

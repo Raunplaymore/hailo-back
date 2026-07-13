@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "check": "node --check server.js && node --check storage/nasArchive.js && node --check nas-storage/storage-api/server.js && node scripts/check-coach-findings-passthrough.mjs && node scripts/check-infer-pending-result.mjs && node scripts/check-files-detail-cache-priority.mjs && node scripts/check-debug-detection-filter.mjs && node scripts/check-debug-frame-timeline.mjs && node scripts/check-withheld-infer-result.mjs && node scripts/check-nas-archive.mjs"
+    "check": "node --check server.js && node --check storage/nasArchive.js && node --check nas-storage/storage-api/server.js && node --check nas-storage/storage-api/library.js && node scripts/check-coach-findings-passthrough.mjs && node scripts/check-infer-pending-result.mjs && node scripts/check-files-detail-cache-priority.mjs && node scripts/check-debug-detection-filter.mjs && node scripts/check-debug-frame-timeline.mjs && node scripts/check-withheld-infer-result.mjs && node scripts/check-nas-archive.mjs"
   },
   "dependencies": {
     "express": "^5.1.0",

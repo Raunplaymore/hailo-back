@@ -30,6 +30,7 @@ const cameraBaseUrl = process.env.CAMERA_BASE_URL || 'http://127.0.0.1:3001';
 const bodyAnalyzerBaseUrl = process.env.BODY_ANALYZER_BASE_URL || inferBaseUrl;
 const inferAnalysisDir = path.join(dataDir, 'analysis');
 const analysisCacheDir = process.env.ANALYSIS_CACHE_DIR || path.join(dataDir, 'service-analysis-cache');
+const nasDeletionCursorPath = path.join(dataDir, 'nas-deletion-cursor.json');
 const expectedInferAnalysisVersion = process.env.INFER_ANALYSIS_VERSION || 'hailo-coach-service7-v10';
 const debugDir = path.join(dataDir, 'debug');
 const inferDebugFrameDir = path.join(debugDir, 'infer-frames');
@@ -38,6 +39,7 @@ const nasArchive = createNasArchive({
   token: process.env.NAS_ARCHIVE_TOKEN,
   timeoutMs: Number(process.env.NAS_ARCHIVE_TIMEOUT_MS || 120_000),
   onStatus: (archiveStatus) => updateNasArchiveStatus(archiveStatus.jobId, archiveStatus),
+  onDeleted: (jobId) => setImmediate(() => applyNasDeletion(jobId)),
 });
 
 // Ensure upload directory exists
@@ -1021,6 +1023,45 @@ function resumeNasArchiveQueue() {
     const cache = readAnalysisCache(jobId);
     if (!cache || !['done', 'failed'].includes(cache.status) || isNasArchiveComplete(cache.nasArchive)) continue;
     queueNasArchive(cache);
+  }
+}
+
+function readNasDeletionCursor() {
+  try {
+    return JSON.parse(fs.readFileSync(nasDeletionCursorPath, 'utf8')).cursor || '';
+  } catch {
+    return '';
+  }
+}
+
+function writeNasDeletionCursor(cursor) {
+  fs.writeFileSync(nasDeletionCursorPath, JSON.stringify({ cursor, updatedAt: new Date().toISOString() }, null, 2), 'utf8');
+}
+
+async function applyNasDeletion(jobId) {
+  if (!isSafeJobId(jobId)) return;
+  const shot = shotStore.getShotByJobId(jobId);
+  const cache = readAnalysisCache(jobId);
+  if (shot?.media?.filename) await removeIfPresent(resolveUploadPath(shot.media.filename));
+  await removeJobArtifacts(jobId, cache);
+  if (shot?.media?.filename) shotStore.removeShotByFilename(shot.media.filename);
+}
+
+let nasDeletionSyncInProgress = false;
+async function syncNasDeletions() {
+  if (!nasArchive.enabled || nasDeletionSyncInProgress) return;
+  nasDeletionSyncInProgress = true;
+  try {
+    const cursor = readNasDeletionCursor();
+    const result = await nasArchive.listDeletions(cursor);
+    for (const deletion of result.deletions || []) {
+      await applyNasDeletion(deletion.jobId);
+    }
+    if (result.cursor && result.cursor !== cursor) writeNasDeletionCursor(result.cursor);
+  } catch (error) {
+    console.warn(`[nas-archive] deletion sync failed: ${error.message}`);
+  } finally {
+    nasDeletionSyncInProgress = false;
   }
 }
 
@@ -3143,4 +3184,7 @@ app.use((err, _req, res, _next) => {
 app.listen(PORT, () => {
   console.log(`Swing server listening on port ${PORT}`);
   setImmediate(resumeNasArchiveQueue);
+  setImmediate(syncNasDeletions);
+  const nasDeletionTimer = setInterval(syncNasDeletions, 5 * 60 * 1000);
+  nasDeletionTimer.unref?.();
 });
