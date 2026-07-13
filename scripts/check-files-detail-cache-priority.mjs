@@ -5,6 +5,8 @@ import fs from "node:fs";
 const source = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
 
 const required = [
+  "const cacheJobId = shot?.jobId || derivedJobId",
+  "const cached = readAnalysisCache(cacheJobId)",
   "const effectiveStatus =",
   "cachedFileStatus ||",
   "const effectiveAnalysis = cached ? cachedAnalysis",

@@ -2690,7 +2690,11 @@ app.get('/api/files/detail', async (_req, res) => {
       videoFiles.map(async (filename) => {
         const shot = shotStore.getShotByMediaName(filename);
         const derivedJobId = path.basename(filename, path.extname(filename));
-        const cached = readAnalysisCache(derivedJobId);
+        // Upload filenames contain their own unique prefix and do not have to
+        // equal the UUID analysis jobId.  Look up the cache with the shot's
+        // canonical jobId whenever it is available.
+        const cacheJobId = shot?.jobId || derivedJobId;
+        const cached = readAnalysisCache(cacheJobId);
         const cachedAnalysis = cached?.analysis || null;
         const cachedStatus = cached?.status || null;
         const cachedFileStatus = cachedStatus ? mapCacheStatusToFileStatus(cachedStatus) : null;
