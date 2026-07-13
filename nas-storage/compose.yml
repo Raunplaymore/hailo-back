@@ -11,7 +11,8 @@ services:
       LIBRARY_PASSWORD: ${LIBRARY_PASSWORD:-}
       LIBRARY_SESSION_SECRET: ${LIBRARY_SESSION_SECRET:-}
       LIBRARY_COOKIE_SECURE: ${LIBRARY_COOKIE_SECURE:-true}
-      WEB_ROOT: /web
+      LIBRARY_AUTH_MODE: ${LIBRARY_AUTH_MODE:-tailnet}
+      WEB_ROOT: /web/current
     volumes:
       - /volume1/hailo:/archive
       - /volume1/hailo/web:/web:ro

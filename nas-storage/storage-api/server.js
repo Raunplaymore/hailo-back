@@ -10,6 +10,7 @@ const validArtifacts = new Set(['video', 'analysis-cache', 'analysis-result', 'b
 const libraryPassword = process.env.LIBRARY_PASSWORD;
 const librarySessionSecret = process.env.LIBRARY_SESSION_SECRET;
 const libraryCookieSecure = process.env.LIBRARY_COOKIE_SECURE !== 'false';
+const libraryAuthMode = process.env.LIBRARY_AUTH_MODE || 'tailnet';
 const port = Number(process.env.PORT || 8080);
 const webRoot = process.env.WEB_ROOT || '/web';
 
@@ -185,6 +186,7 @@ const library = createLibrary({
   password: libraryPassword,
   sessionSecret: librarySessionSecret,
   cookieSecure: libraryCookieSecure,
+  authMode: libraryAuthMode,
   deleteJob: deleteArchiveJob,
 });
 
@@ -203,6 +205,17 @@ const server = http.createServer(async (request, response) => {
     if (!isAuthorized(request)) return send(response, 401, { ok: false, error: 'unauthorized' });
     if (request.method === 'GET' && url.pathname === '/v1/deletions') {
       return send(response, 200, await listDeletions(String(url.searchParams.get('after') || '')));
+    }
+    const deletionAckMatch = url.pathname.match(/^\/v1\/deletions\/([a-zA-Z0-9._-]+)\/ack$/);
+    if (request.method === 'POST' && deletionAckMatch) {
+      const jobId = safeSegment(deletionAckMatch[1]);
+      const tombstone = jobId ? await readTombstone(jobId) : null;
+      if (!jobId || !tombstone) return send(response, 404, { ok: false, error: 'not_found' });
+      const updated = { ...tombstone, piSyncedAt: new Date().toISOString() };
+      const target = tombstonePath(jobId);
+      await fs.promises.writeFile(`${target}.part`, `${JSON.stringify(updated, null, 2)}\n`, 'utf8');
+      await fs.promises.rename(`${target}.part`, target);
+      return send(response, 200, { ok: true, jobId, piSyncedAt: updated.piSyncedAt });
     }
 
     const jobMatch = url.pathname.match(/^\/v1\/jobs\/([a-zA-Z0-9._-]+)$/);

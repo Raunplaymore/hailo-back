@@ -104,12 +104,13 @@ function jobSummary(manifest) {
   };
 }
 
-function createLibrary({ archiveRoot, password, sessionSecret, cookieSecure = true, deleteJob }) {
-  const enabled = Boolean(password && sessionSecret);
+function createLibrary({ archiveRoot, password, sessionSecret, cookieSecure = true, authMode = 'tailnet', deleteJob }) {
+  const usesPasswordAuth = authMode === 'password';
+  const enabled = !usesPasswordAuth || Boolean(password && sessionSecret);
   const jobsRoot = path.join(archiveRoot, 'jobs');
 
   function authenticated(request) {
-    return enabled && Boolean(readSession(request, sessionSecret));
+    return enabled && (!usesPasswordAuth || Boolean(readSession(request, sessionSecret)));
   }
 
   async function listJobs(url) {
@@ -171,7 +172,7 @@ function createLibrary({ archiveRoot, password, sessionSecret, cookieSecure = tr
       sendJson(response, 503, { ok: false, error: 'library_not_configured' });
       return true;
     }
-    if (request.method === 'POST' && url.pathname === '/api/auth/login') {
+    if (request.method === 'POST' && url.pathname === '/api/auth/login' && usesPasswordAuth) {
       const body = await readJson(request);
       const supplied = Buffer.from(String(body.password || ''));
       const expected = Buffer.from(password);
@@ -183,7 +184,7 @@ function createLibrary({ archiveRoot, password, sessionSecret, cookieSecure = tr
       sendJson(response, 200, { ok: true }, { 'Set-Cookie': cookie(createSession(sessionSecret), cookieSecure) });
       return true;
     }
-    if (request.method === 'POST' && url.pathname === '/api/auth/logout') {
+    if (request.method === 'POST' && url.pathname === '/api/auth/logout' && usesPasswordAuth) {
       sendJson(response, 200, { ok: true }, { 'Set-Cookie': expiredCookie(cookieSecure) });
       return true;
     }

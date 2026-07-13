@@ -1056,6 +1056,7 @@ async function syncNasDeletions() {
     const result = await nasArchive.listDeletions(cursor);
     for (const deletion of result.deletions || []) {
       await applyNasDeletion(deletion.jobId);
+      await nasArchive.acknowledgeDeletion(deletion.jobId);
     }
     if (result.cursor && result.cursor !== cursor) writeNasDeletionCursor(result.cursor);
   } catch (error) {

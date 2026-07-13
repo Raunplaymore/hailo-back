@@ -163,7 +163,13 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
     return response.json();
   }
 
-  return { enabled, schedule, deleteJob, listDeletions, isPending: (jobId, status) => pending.has(`${jobId}:${status}`) };
+  async function acknowledgeDeletion(jobId) {
+    if (!enabled || !jobId) return { ok: true, skipped: true };
+    const response = await request(`/v1/deletions/${encodeURIComponent(jobId)}/ack`, { method: 'POST' });
+    return response.json();
+  }
+
+  return { enabled, schedule, deleteJob, listDeletions, acknowledgeDeletion, isPending: (jobId, status) => pending.has(`${jobId}:${status}`) };
 }
 
 module.exports = { createNasArchive };

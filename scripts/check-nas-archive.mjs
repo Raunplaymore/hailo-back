@@ -29,11 +29,14 @@ assert.match(storageApiSource, /GET' && manifestMatch/, 'NAS API must provide an
 assert.match(storageApiSource, /GET' && validArtifacts\.has\(artifact\)/, 'NAS API must provide authenticated artifact retrieval.');
 assert.match(storageApiSource, /request\.method === 'DELETE' && jobMatch/, 'NAS API must support authenticated whole-job deletion.');
 assert.match(storageApiSource, /\/v1\/deletions/, 'NAS API must expose an authenticated tombstone feed for Pi cleanup.');
+assert.match(storageApiSource, /const deletionAckMatch = url\.pathname\.match/, 'NAS API must accept Pi tombstone acknowledgements.');
 assert.match(storageApiSource, /job_deleted/, 'NAS API must reject uploads for tombstoned jobs.');
 assert.match(librarySource, /\/api\/auth\/login/, 'NAS library must provide a browser login endpoint.');
 assert.match(librarySource, /\/api\/library\/jobs/, 'NAS library must provide authenticated job listing and detail endpoints.');
 assert.match(librarySource, /Accept-Ranges': 'bytes'/, 'NAS library must support Range video streaming.');
 assert.match(librarySource, /HttpOnly/, 'NAS library authentication must use an HttpOnly cookie.');
+assert.match(archiveSource, /acknowledgeDeletion/, 'Pi NAS client must acknowledge completed deletion sync.');
+assert.match(serverSource, /await nasArchive\.acknowledgeDeletion\(deletion\.jobId\)/, 'Pi must acknowledge a tombstone only after local cleanup.');
 assert.match(storageApiSource, /Cache-Control': 'private, no-store'/, 'NAS retrieval must not be cached by intermediaries.');
 assert.match(composeSource, /STORAGE_BIND_HOST:-127\.0\.0\.1/, 'NAS storage must bind only to loopback before Tailscale Serve.');
 assert.match(workflowSource, /envs: NAS_ARCHIVE_URL,NAS_ARCHIVE_TOKEN/, 'Deployment must pass NAS credentials only as runtime environment variables.');
