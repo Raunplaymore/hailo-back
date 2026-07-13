@@ -133,8 +133,9 @@ pm2 save && pm2 startup
 ## NAS 아카이브 (선택)
 
 Pi는 분석을 로컬에서 끝낸 뒤, terminal 상태(`done`, `failed`)의 원본 영상과 분석 cache/result/body/meta
-artifact를 NAS storage API로 비동기 전송한다. NAS 연결 또는 전송 실패는 분석 결과에 영향을 주지 않으며,
-전송은 최대 3회 재시도한다.
+artifact를 NAS storage API로 자동 비동기 전송한다. NAS 연결 또는 전송 실패는 분석 결과에 영향을 주지 않으며,
+전송은 최대 3회 재시도한다. 전송 상태는 분석 cache에 영속화되고, Pi가 재시작되면 완료되지 않은 작업을
+자동 재개한다. 최종 실패는 `POST /api/archive/:jobId/retry`로 다시 큐에 넣을 수 있다.
 
 1. NAS에서 `nas-storage/` 내용을 `/volume1/hailo/compose`로 복사한다.
 2. `.env.example`을 `.env`로 복사하고 강한 `ARCHIVE_TOKEN`을 설정한다. `STORAGE_BIND_HOST`는

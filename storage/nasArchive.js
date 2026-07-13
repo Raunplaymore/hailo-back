@@ -4,10 +4,18 @@ const path = require('path');
 const TERMINAL_STATUSES = new Set(['done', 'failed']);
 const MAX_ATTEMPTS = 3;
 
-function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = console }) {
+function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = console, onStatus } = {}) {
   const origin = String(baseUrl || '').replace(/\/$/, '');
   const enabled = Boolean(origin && token);
   const pending = new Set();
+
+  function reportStatus(payload, status) {
+    try {
+      onStatus?.({ jobId: payload.jobId, ...status });
+    } catch (error) {
+      logger.warn(`[nas-archive] status update failed for ${payload.jobId}: ${error.message}`);
+    }
+  }
 
   async function request(target, options = {}) {
     const controller = new AbortController();
@@ -65,38 +73,75 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
     }
     const archivedShot = shot ? JSON.parse(JSON.stringify(shot)) : null;
     if (archivedShot?.media) delete archivedShot.media.path;
+    const archivedAt = new Date().toISOString();
     await uploadJson(jobId, 'manifest', {
       jobId,
       status,
-      archivedAt: new Date().toISOString(),
+      archivedAt,
       shot: archivedShot,
       analysis: cache?.analysis || null,
       progress: cache?.progress || null,
       artifacts: uploaded,
     });
+    return { archivedAt, artifacts: uploaded };
   }
 
   function schedule(payload, attempt = 0) {
-    if (!enabled || !payload?.jobId || !TERMINAL_STATUSES.has(payload.status)) return;
+    if (!enabled || !payload?.jobId || !TERMINAL_STATUSES.has(payload.status)) return false;
     const key = `${payload.jobId}:${payload.status}`;
-    if (pending.has(key)) return;
+    if (pending.has(key)) return false;
     pending.add(key);
     setImmediate(async () => {
+      const attemptNumber = attempt + 1;
       try {
-        await archive(payload);
+        reportStatus(payload, {
+          state: 'uploading',
+          attempt: attemptNumber,
+          retryAt: null,
+          error: null,
+          updatedAt: new Date().toISOString(),
+        });
+        const result = await archive(payload);
+        reportStatus(payload, {
+          state: 'stored',
+          attempt: attemptNumber,
+          retryAt: null,
+          error: null,
+          archivedAt: result.archivedAt,
+          artifactCount: result.artifacts.length,
+          updatedAt: new Date().toISOString(),
+        });
         logger.info(`[nas-archive] archived ${payload.jobId}`);
       } catch (error) {
-        logger.warn(`[nas-archive] ${payload.jobId} attempt ${attempt + 1} failed: ${error.message}`);
-        if (attempt + 1 < MAX_ATTEMPTS) {
-          setTimeout(() => schedule(payload, attempt + 1), 5_000 * (attempt + 1));
+        const errorMessage = String(error.message || 'NAS archive failed').slice(0, 240);
+        logger.warn(`[nas-archive] ${payload.jobId} attempt ${attemptNumber} failed: ${errorMessage}`);
+        if (attemptNumber < MAX_ATTEMPTS) {
+          const delayMs = 5_000 * attemptNumber;
+          reportStatus(payload, {
+            state: 'retrying',
+            attempt: attemptNumber,
+            retryAt: new Date(Date.now() + delayMs).toISOString(),
+            error: errorMessage,
+            updatedAt: new Date().toISOString(),
+          });
+          setTimeout(() => schedule(payload, attempt + 1), delayMs);
+        } else {
+          reportStatus(payload, {
+            state: 'failed',
+            attempt: attemptNumber,
+            retryAt: null,
+            error: errorMessage,
+            updatedAt: new Date().toISOString(),
+          });
         }
       } finally {
         pending.delete(key);
       }
     });
+    return true;
   }
 
-  return { enabled, schedule };
+  return { enabled, schedule, isPending: (jobId, status) => pending.has(`${jobId}:${status}`) };
 }
 
 module.exports = { createNasArchive };

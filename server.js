@@ -37,6 +37,7 @@ const nasArchive = createNasArchive({
   baseUrl: process.env.NAS_ARCHIVE_URL,
   token: process.env.NAS_ARCHIVE_TOKEN,
   timeoutMs: Number(process.env.NAS_ARCHIVE_TIMEOUT_MS || 120_000),
+  onStatus: (archiveStatus) => updateNasArchiveStatus(archiveStatus.jobId, archiveStatus),
 });
 
 // Ensure upload directory exists
@@ -931,7 +932,7 @@ function mergeAnalysisCache(jobId, patch) {
   return writeAnalysisCache(jobId, next);
 }
 
-function writeAnalysisCache(jobId, cache) {
+function writeAnalysisCache(jobId, cache, { scheduleArchive = true } = {}) {
   const cachePath = analysisCachePath(jobId);
   if (!cachePath || !cache) return null;
   const payload = {
@@ -940,16 +941,43 @@ function writeAnalysisCache(jobId, cache) {
     updatedAt: new Date().toISOString(),
   };
   fs.writeFileSync(cachePath, JSON.stringify(payload, null, 2), 'utf8');
-  queueNasArchive(payload);
+  if (scheduleArchive) queueNasArchive(payload);
   return payload;
 }
 
-function queueNasArchive(cache) {
-  if (!nasArchive.enabled || !['done', 'failed'].includes(cache?.status) || !cache?.jobId) return;
+function updateNasArchiveStatus(jobId, patch) {
+  const cache = readAnalysisCache(jobId);
+  if (!cache) return null;
+  return writeAnalysisCache(
+    jobId,
+    {
+      ...cache,
+      nasArchive: {
+        ...(cache.nasArchive && typeof cache.nasArchive === 'object' ? cache.nasArchive : {}),
+        ...patch,
+        updatedAt: patch.updatedAt || new Date().toISOString(),
+      },
+    },
+    { scheduleArchive: false },
+  );
+}
+
+function queueNasArchive(cache, { force = false } = {}) {
+  if (!['done', 'failed'].includes(cache?.status) || !cache?.jobId) return false;
+  if (!nasArchive.enabled) {
+    updateNasArchiveStatus(cache.jobId, {
+      state: 'disabled',
+      error: 'NAS archive is not configured',
+      retryAt: null,
+    });
+    return false;
+  }
+  const current = cache.nasArchive && typeof cache.nasArchive === 'object' ? cache.nasArchive : {};
+  if (!force && ['stored', 'pending', 'uploading', 'retrying'].includes(current.state)) return false;
   const shot = shotStore.getShotByJobId(cache.jobId);
   const metaPath = cache.metaPath || cache.progress?.metaPath || shot?.metadata?.metaPath;
   const bodyPath = cache.progress?.bodyPath || bodyArtifactPath(cache.jobId);
-  nasArchive.schedule({
+  const scheduled = nasArchive.schedule({
     jobId: cache.jobId,
     status: cache.status,
     shot,
@@ -962,6 +990,34 @@ function queueNasArchive(cache) {
       { artifact: 'meta', filePath: metaPath },
     ],
   });
+  if (scheduled) {
+    updateNasArchiveStatus(cache.jobId, {
+      state: 'pending',
+      attempt: current.attempt || 0,
+      retryAt: null,
+      error: null,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+  return scheduled;
+}
+
+function resumeNasArchiveQueue() {
+  if (!nasArchive.enabled) return;
+  let entries = [];
+  try {
+    entries = fs.readdirSync(analysisCacheDir, { withFileTypes: true });
+  } catch (error) {
+    console.warn(`[nas-archive] unable to read cache directory: ${error.message}`);
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    const jobId = path.basename(entry.name, '.json');
+    const cache = readAnalysisCache(jobId);
+    if (!cache || !['done', 'failed'].includes(cache.status) || cache.nasArchive?.state === 'stored') continue;
+    queueNasArchive(cache);
+  }
 }
 
 function mapInferStatus(status) {
@@ -2602,6 +2658,36 @@ async function respondJobResult(req, res) {
 app.get('/api/analyze/:jobId', respondJobStatus);
 app.get('/api/analyze/:jobId/result', respondJobResult);
 
+app.post('/api/archive/:jobId/retry', (req, res) => {
+  const jobId = req.params.jobId;
+  if (!isSafeJobId(jobId)) {
+    return res.status(400).json({ ok: false, message: 'Invalid jobId' });
+  }
+  const cache = readAnalysisCache(jobId);
+  if (!cache || !['done', 'failed'].includes(cache.status)) {
+    return res.status(404).json({ ok: false, message: 'Completed analysis cache not found' });
+  }
+  if (!nasArchive.enabled) {
+    return res.status(503).json({ ok: false, message: 'NAS archive is not configured' });
+  }
+  const state = cache.nasArchive?.state;
+  if (state === 'stored') {
+    return res.status(409).json({ ok: false, message: 'NAS archive is already complete' });
+  }
+  if (['pending', 'uploading', 'retrying'].includes(state)) {
+    return res.status(202).json({ ok: true, jobId, scheduled: false, archive: cache.nasArchive });
+  }
+  const scheduled = queueNasArchive(cache, { force: true });
+  const refreshed = readAnalysisCache(jobId);
+  return res.status(scheduled ? 202 : 500).json({
+    ok: scheduled,
+    jobId,
+    scheduled,
+    archive: refreshed?.nasArchive || null,
+    message: scheduled ? null : 'Unable to schedule NAS archive',
+  });
+});
+
 const listShotsHandler = (_req, res) => {
   const shots = shotStore.listShots();
   res.json({ ok: true, shots });
@@ -2761,6 +2847,7 @@ app.get('/api/files/detail', async (_req, res) => {
           status: effectiveStatus,
           errorCode,
           errorMessage,
+          nasArchive: cached?.nasArchive || null,
           metaPath: cached?.metaPath || null,
           size: stats?.size,
           modifiedAt: stats?.mtime?.toISOString(),
@@ -3023,4 +3110,5 @@ app.use((err, _req, res, _next) => {
 
 app.listen(PORT, () => {
   console.log(`Swing server listening on port ${PORT}`);
+  setImmediate(resumeNasArchiveQueue);
 });
