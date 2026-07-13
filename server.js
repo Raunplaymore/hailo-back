@@ -2694,7 +2694,17 @@ app.get('/api/files/detail', async (_req, res) => {
         const cachedAnalysis = cached?.analysis || null;
         const cachedStatus = cached?.status || null;
         const cachedFileStatus = cachedStatus ? mapCacheStatusToFileStatus(cachedStatus) : null;
-        const cachedAnalyzed = cachedStatus === 'done';
+        // The analysis cache is updated by infer polling while the original
+        // shot record can retain its initial `running` value.  Prefer the
+        // cache for both status and result so completed files leave the
+        // pending list without requiring the shot record to be rewritten.
+        const effectiveStatus =
+          cachedFileStatus ||
+          normalizeJobStatus(shot?.status) ||
+          (shot?.analysis
+            ? (looksLikeAnalysisFailure(shot.analysis) ? 'failed' : 'succeeded')
+            : 'not-analyzed');
+        const effectiveAnalysis = cached ? cachedAnalysis : shot ? buildJobAnalysisPayload(shot) : null;
         let stats;
         try {
           stats = await fs.promises.stat(path.join(uploadDir, filename));
@@ -2702,13 +2712,13 @@ app.get('/api/files/detail', async (_req, res) => {
           // ignore stat errors; keep lightweight listing
         }
         const errorCode =
-          shot?.analysis?.errorCode ??
           cachedAnalysis?.errorCode ??
+          shot?.analysis?.errorCode ??
           cached?.errorCode ??
           null;
         const errorMessage =
-          shot?.analysis?.errorMessage ??
           cachedAnalysis?.errorMessage ??
+          shot?.analysis?.errorMessage ??
           cached?.errorMessage ??
           null;
         return {
@@ -2716,21 +2726,15 @@ app.get('/api/files/detail', async (_req, res) => {
           url: uploadsUrl(filename),
           shotId: shot?.id || null,
           jobId: shot?.jobId || cached?.jobId || derivedJobId,
-          analyzed:
-            normalizeJobStatus(shot?.status) === 'succeeded' ||
-            (!shot && cachedAnalyzed),
-          status:
-            normalizeJobStatus(shot?.status) ||
-            (shot?.analysis
-              ? (looksLikeAnalysisFailure(shot.analysis) ? 'failed' : 'succeeded')
-              : cachedFileStatus || 'not-analyzed'),
+          analyzed: effectiveStatus === 'succeeded',
+          status: effectiveStatus,
           errorCode,
           errorMessage,
           metaPath: cached?.metaPath || null,
           size: stats?.size,
           modifiedAt: stats?.mtime?.toISOString(),
-          analysis: shot ? buildJobAnalysisPayload(shot) : cachedAnalysis,
-          progress: shot?.progress || cached?.progress || null,
+          analysis: effectiveAnalysis,
+          progress: cached?.progress || shot?.progress || null,
         };
       }),
     );
