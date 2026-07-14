@@ -3097,14 +3097,15 @@ app.post('/api/labs/club-preprocess/:jobId', async (req, res) => {
     timeoutMs: 360_000,
   });
   if (!response.ok) {
+    const inferredMessage =
+      response.json?.detail?.error ||
+      response.json?.error ||
+      response.json?.message ||
+      response.error?.message;
     return res.status(response.status || 500).json({
       ok: false,
-      message:
-        response.json?.detail?.error ||
-        response.json?.error ||
-        response.json?.message ||
-        response.error?.message ||
-        'club preprocessing lab failed',
+      errorCode: response.status ? `LAB_INFER_HTTP_${response.status}` : 'LAB_INFER_UNREACHABLE',
+      message: inferredMessage || `club preprocessing lab failed (infer HTTP ${response.status || 'unreachable'})`,
     });
   }
   return res.json(response.json);
