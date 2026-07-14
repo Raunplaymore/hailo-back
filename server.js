@@ -3078,9 +3078,23 @@ app.post('/api/labs/club-preprocess/:jobId', async (req, res) => {
   if (!isSafeJobId(jobId)) {
     return res.status(400).json({ ok: false, message: 'Invalid jobId' });
   }
-  const inputPath = resolveDebugVideoPath(jobId);
-  if (!inputPath) {
+  const sourceVideoPath = resolveDebugVideoPath(jobId);
+  if (!sourceVideoPath) {
     return res.status(404).json({ ok: false, message: 'video not found', jobId });
+  }
+  const shot = shotStore.getShotByJobId(jobId);
+  const storedInputPath = shot?.metadata?.analysisInput?.path;
+  let inputPath = storedInputPath && fs.existsSync(storedInputPath) ? storedInputPath : sourceVideoPath;
+  if (inputPath === sourceVideoPath) {
+    const filename = shot?.media?.filename || path.basename(sourceVideoPath);
+    const prepared = await prepareVideoForAnalysis(sourceVideoPath, filename);
+    if (prepared.ok === false || !prepared.path) {
+      return res.status(400).json({
+        ok: false,
+        message: `video preparation failed: ${prepared.error || 'prepared input unavailable'}`,
+      });
+    }
+    inputPath = prepared.path;
   }
   const bodyPath = bodyArtifactPath(jobId);
   const url = inferUrl('/v1/labs/club-preprocess');
