@@ -104,6 +104,25 @@ function jobSummary(manifest) {
   };
 }
 
+function archiveKey(manifest) {
+  return `${String(manifest?.archivedAt || '')}\u0000${String(manifest?.jobId || '')}`;
+}
+
+function decodeCursor(value) {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
+    if (typeof parsed?.archivedAt !== 'string' || !safeSegment(parsed?.jobId)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function encodeCursor(manifest) {
+  return Buffer.from(JSON.stringify({ archivedAt: manifest.archivedAt, jobId: manifest.jobId })).toString('base64url');
+}
+
 function createLibrary({ archiveRoot, password, sessionSecret, cookieSecure = true, authMode = 'tailnet', deleteJob }) {
   const usesPasswordAuth = authMode === 'password';
   const enabled = !usesPasswordAuth || Boolean(password && sessionSecret);
@@ -115,6 +134,9 @@ function createLibrary({ archiveRoot, password, sessionSecret, cookieSecure = tr
 
   async function listJobs(url) {
     const limit = Math.max(1, Math.min(100, Number(url.searchParams.get('limit')) || 50));
+    const cursor = decodeCursor(url.searchParams.get('cursor'));
+    const since = Date.parse(String(url.searchParams.get('since') || ''));
+    const until = Date.parse(String(url.searchParams.get('until') || ''));
     let entries = [];
     try {
       entries = await fs.promises.readdir(jobsRoot, { withFileTypes: true });
@@ -124,12 +146,21 @@ function createLibrary({ archiveRoot, password, sessionSecret, cookieSecure = tr
     const manifests = await Promise.all(
       entries.filter((entry) => entry.isDirectory()).map((entry) => readManifest(path.join(jobsRoot, entry.name))),
     );
-    const jobs = manifests
+    const matchingJobs = manifests
       .filter((manifest) => manifest?.jobId && safeSegment(manifest.jobId))
-      .sort((a, b) => String(b.archivedAt || '').localeCompare(String(a.archivedAt || '')))
-      .slice(0, limit)
-      .map(jobSummary);
-    return { ok: true, jobs, nextCursor: null };
+      .filter((manifest) => !Number.isFinite(since) || Date.parse(String(manifest.archivedAt || '')) >= since)
+      .filter((manifest) => !Number.isFinite(until) || Date.parse(String(manifest.archivedAt || '')) <= until)
+      .sort((a, b) => archiveKey(b).localeCompare(archiveKey(a)));
+    const remainingJobs = cursor
+      ? matchingJobs.filter((manifest) => archiveKey(manifest) < archiveKey(cursor))
+      : matchingJobs;
+    const page = remainingJobs.slice(0, limit);
+    return {
+      ok: true,
+      jobs: page.map(jobSummary),
+      total: matchingJobs.length,
+      nextCursor: remainingJobs.length > page.length ? encodeCursor(page.at(-1)) : null,
+    };
   }
 
   async function streamVideo(response, jobId, manifest, request) {
