@@ -3070,6 +3070,46 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
   });
 });
 
+// Deliberately separate from /api/analyze: this creates only temporary
+// derived-video detection metadata and a comparison report. It never writes a
+// production analysis cache or asks NAS archival to run.
+app.post('/api/labs/club-preprocess/:jobId', async (req, res) => {
+  const jobId = req.params.jobId;
+  if (!isSafeJobId(jobId)) {
+    return res.status(400).json({ ok: false, message: 'Invalid jobId' });
+  }
+  const inputPath = resolveDebugVideoPath(jobId);
+  if (!inputPath) {
+    return res.status(404).json({ ok: false, message: 'video not found', jobId });
+  }
+  const bodyPath = bodyArtifactPath(jobId);
+  const url = inferUrl('/v1/labs/club-preprocess');
+  if (!url) {
+    return res.status(500).json({ ok: false, message: 'infer service not configured' });
+  }
+  const response = await inferFetchJson(url, {
+    method: 'POST',
+    body: {
+      jobId,
+      inputPath,
+      bodyPath: fs.existsSync(bodyPath) ? bodyPath : null,
+    },
+    timeoutMs: 360_000,
+  });
+  if (!response.ok) {
+    return res.status(response.status || 500).json({
+      ok: false,
+      message:
+        response.json?.detail?.error ||
+        response.json?.error ||
+        response.json?.message ||
+        response.error?.message ||
+        'club preprocessing lab failed',
+    });
+  }
+  return res.json(response.json);
+});
+
 app.post('/api/debug/infer/:jobId/debug-meta', async (req, res) => {
   const jobId = req.params.jobId;
   if (!isSafeJobId(jobId)) {
