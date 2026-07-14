@@ -6,7 +6,12 @@ const { createLibrary } = require('./library');
 const archiveRoot = process.env.ARCHIVE_ROOT || '/archive';
 const token = process.env.ARCHIVE_TOKEN;
 const maxUploadBytes = Number(process.env.MAX_UPLOAD_BYTES || 4 * 1024 * 1024 * 1024);
-const validArtifacts = new Set(['video', 'analysis-cache', 'analysis-result', 'body', 'meta']);
+const validArtifacts = new Set([
+  'video', 'analysis-cache', 'analysis-result', 'body', 'meta',
+  'lab-input-video', 'lab-contrast-video', 'lab-wrist-roi-video',
+  'lab-body', 'lab-score', 'lab-run', 'lab-variants',
+  'lab-source-meta', 'lab-contrast-meta', 'lab-wrist-roi-meta',
+]);
 const libraryPassword = process.env.LIBRARY_PASSWORD;
 const librarySessionSecret = process.env.LIBRARY_SESSION_SECRET;
 const libraryCookieSecure = process.env.LIBRARY_COOKIE_SECURE !== 'false';

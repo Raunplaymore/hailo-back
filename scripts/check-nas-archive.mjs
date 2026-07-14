@@ -36,8 +36,13 @@ assert.match(librarySource, /\/api\/library\/jobs/, 'NAS library must provide au
 assert.match(librarySource, /Accept-Ranges': 'bytes'/, 'NAS library must support Range video streaming.');
 assert.match(librarySource, /HttpOnly/, 'NAS library authentication must use an HttpOnly cookie.');
 assert.match(archiveSource, /acknowledgeDeletion/, 'Pi NAS client must acknowledge completed deletion sync.');
+assert.match(archiveSource, /payload\.manifest/, 'NAS archive client must preserve experiment manifest metadata.');
 assert.match(serverSource, /await nasArchive\.acknowledgeDeletion\(deletion\.jobId\)/, 'Pi must acknowledge a tombstone only after local cleanup.');
+assert.match(serverSource, /async function queueLabNasArchive/, 'Pi service must archive completed preprocessing experiments.');
+assert.match(serverSource, /archiveKind: 'club_preprocess_lab'/, 'Lab archives must be identifiable independently of production analyses.');
+assert.match(serverSource, /lab-wrist-roi-meta/, 'Lab archives must retain variant metadata for later review.');
 assert.match(storageApiSource, /Cache-Control': 'private, no-store'/, 'NAS retrieval must not be cached by intermediaries.');
+assert.match(storageApiSource, /lab-input-video/, 'NAS storage must permit lab training artifacts.');
 assert.match(composeSource, /STORAGE_BIND_HOST:-127\.0\.0\.1/, 'NAS storage must bind only to loopback before Tailscale Serve.');
 assert.match(workflowSource, /envs: NAS_ARCHIVE_URL,NAS_ARCHIVE_TOKEN/, 'Deployment must pass NAS credentials only as runtime environment variables.');
 

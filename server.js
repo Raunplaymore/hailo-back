@@ -1015,6 +1015,54 @@ function queueNasArchive(cache, { force = false } = {}) {
   return scheduled;
 }
 
+async function queueLabNasArchive({ jobId, inputPath, sourceVideoPath, bodyPath, labResult }) {
+  const workspace = path.dirname(labResult.scorePath || '');
+  if (!workspace || !fs.existsSync(workspace)) return { state: 'unavailable', error: 'lab workspace missing' };
+  const archiveJobId = `lab-${jobId}`;
+  const run = await readJsonFile(path.join(workspace, 'run.json'));
+  const metaPaths = run?.metaPaths && typeof run.metaPaths === 'object' ? run.metaPaths : {};
+  const artifacts = [
+    { artifact: 'lab-input-video', filePath: inputPath },
+    { artifact: 'lab-body', filePath: bodyPath },
+    { artifact: 'lab-score', filePath: labResult.scorePath },
+    { artifact: 'lab-run', filePath: path.join(workspace, 'run.json') },
+    { artifact: 'lab-variants', filePath: path.join(workspace, 'variants.json') },
+    { artifact: 'lab-contrast-video', filePath: path.join(workspace, 'contrast.mp4') },
+    { artifact: 'lab-wrist-roi-video', filePath: path.join(workspace, 'wrist-roi.mp4') },
+    { artifact: 'lab-source-meta', filePath: metaPaths.source },
+    { artifact: 'lab-contrast-meta', filePath: metaPaths.contrast },
+    { artifact: 'lab-wrist-roi-meta', filePath: metaPaths['wrist-roi'] },
+  ];
+  if (!nasArchive.enabled) return { state: 'disabled', archiveJobId, error: 'NAS archive is not configured' };
+  const recordPath = path.join(workspace, 'nas-archive.json');
+  const writeStatus = (archive) => {
+    const record = { archiveJobId, sourceJobId: jobId, archive, updatedAt: new Date().toISOString() };
+    const temporary = `${recordPath}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify(record, null, 2), 'utf8');
+    fs.renameSync(temporary, recordPath);
+  };
+  const scheduled = nasArchive.schedule({
+    jobId: archiveJobId,
+    status: 'done',
+    shot: null,
+    cache: null,
+    artifacts,
+    manifest: {
+      archiveKind: 'club_preprocess_lab',
+      lab: {
+        sourceJobId: jobId,
+        sourceVideoFilename: path.basename(sourceVideoPath || inputPath),
+        inputVideoFilename: path.basename(inputPath),
+        decision: labResult.report?.decision || null,
+        labVersion: labResult.report?.lab || null,
+      },
+    },
+    onStatus: writeStatus,
+  });
+  if (scheduled) writeStatus({ state: 'pending', attempt: 0, error: null });
+  return { state: scheduled ? 'pending' : 'not_scheduled', archiveJobId, recordPath };
+}
+
 function resumeNasArchiveQueue() {
   if (!nasArchive.enabled) return;
   let entries = [];
@@ -3122,7 +3170,14 @@ app.post('/api/labs/club-preprocess/:jobId', async (req, res) => {
       message: inferredMessage || `club preprocessing lab failed (infer HTTP ${response.status || 'unreachable'})`,
     });
   }
-  return res.json(response.json);
+  const archive = await queueLabNasArchive({
+    jobId,
+    inputPath,
+    sourceVideoPath,
+    bodyPath: fs.existsSync(bodyPath) ? bodyPath : null,
+    labResult: response.json,
+  });
+  return res.json({ ...response.json, archive });
 });
 
 app.post('/api/debug/infer/:jobId/debug-meta', async (req, res) => {
