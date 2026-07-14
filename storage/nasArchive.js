@@ -70,7 +70,10 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
 }
 
   async function archive(payload) {
-    const { jobId, status, shot, cache, artifacts } = payload;
+    const { jobId, status, shot, cache } = payload;
+    const artifacts = typeof payload.prepareArtifacts === 'function'
+      ? await payload.prepareArtifacts(payload.artifacts || [])
+      : payload.artifacts || [];
     const uploaded = [];
     for (const { artifact, filePath } of artifacts) {
       if (!filePath || !fs.existsSync(filePath)) continue;

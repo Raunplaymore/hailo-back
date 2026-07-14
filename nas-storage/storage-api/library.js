@@ -92,12 +92,14 @@ function artifactEntry(manifest, artifact) {
 
 function jobSummary(manifest) {
   const video = artifactEntry(manifest, 'video');
+  const thumbnail = artifactEntry(manifest, 'thumbnail');
   return {
     jobId: manifest.jobId,
     status: manifest.status,
     archivedAt: manifest.archivedAt,
     shot: sanitizeShot(manifest.shot),
     videoStored: Boolean(video),
+    thumbnailUrl: thumbnail ? `/api/library/jobs/${encodeURIComponent(manifest.jobId)}/thumbnail` : null,
     analysis: manifest.analysis
       ? { status: manifest.analysis.status, summary: manifest.analysis.summary, confidence: manifest.analysis.confidence }
       : null,
@@ -196,6 +198,24 @@ function createLibrary({ archiveRoot, password, sessionSecret, cookieSecure = tr
     return fs.createReadStream(target, { start, end }).pipe(response);
   }
 
+  async function streamThumbnail(response, jobId, manifest) {
+    const thumbnail = artifactEntry(manifest, 'thumbnail');
+    if (!thumbnail) return sendJson(response, 404, { ok: false, error: 'thumbnail_unavailable' });
+    const target = path.join(jobsRoot, jobId, 'thumbnail', thumbnail.filename);
+    let stat;
+    try {
+      stat = await fs.promises.stat(target);
+    } catch {
+      return sendJson(response, 404, { ok: false, error: 'thumbnail_unavailable' });
+    }
+    response.writeHead(200, {
+      'Content-Type': 'image/jpeg',
+      'Content-Length': stat.size,
+      'Cache-Control': 'private, max-age=86400',
+    });
+    return fs.createReadStream(target).pipe(response);
+  }
+
   async function handle(request, response) {
     const url = new URL(request.url || '/', 'http://library.local');
     if (!url.pathname.startsWith('/api/')) return false;
@@ -231,7 +251,7 @@ function createLibrary({ archiveRoot, password, sessionSecret, cookieSecure = tr
       sendJson(response, 200, await listJobs(url));
       return true;
     }
-    const match = url.pathname.match(/^\/api\/library\/jobs\/([a-zA-Z0-9._-]+)(?:\/(video))?$/);
+    const match = url.pathname.match(/^\/api\/library\/jobs\/([a-zA-Z0-9._-]+)(?:\/(video|thumbnail))?$/);
     if (!match) {
       sendJson(response, 404, { ok: false, error: 'not_found' });
       return true;
@@ -244,6 +264,10 @@ function createLibrary({ archiveRoot, password, sessionSecret, cookieSecure = tr
     }
     if (request.method === 'GET' && match[2] === 'video') {
       await streamVideo(response, jobId, manifest, request);
+      return true;
+    }
+    if (request.method === 'GET' && match[2] === 'thumbnail') {
+      await streamThumbnail(response, jobId, manifest);
       return true;
     }
     if (request.method === 'GET' && !match[2]) {

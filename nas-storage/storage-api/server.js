@@ -7,7 +7,7 @@ const archiveRoot = process.env.ARCHIVE_ROOT || '/archive';
 const token = process.env.ARCHIVE_TOKEN;
 const maxUploadBytes = Number(process.env.MAX_UPLOAD_BYTES || 4 * 1024 * 1024 * 1024);
 const validArtifacts = new Set([
-  'video', 'analysis-cache', 'analysis-result', 'body', 'meta',
+  'video', 'thumbnail', 'analysis-cache', 'analysis-result', 'body', 'meta',
   'lab-input-video', 'lab-contrast-video', 'lab-wrist-roi-video',
   'lab-body', 'lab-score', 'lab-run', 'lab-variants',
   'lab-source-meta', 'lab-contrast-meta', 'lab-wrist-roi-meta',
@@ -54,6 +54,7 @@ async function sendFile(response, target, contentType) {
 
 function artifactContentType(artifact, filename) {
   if (artifact === 'video') return 'video/mp4';
+  if (artifact === 'thumbnail') return 'image/jpeg';
   if (filename.endsWith('.json')) return 'application/json';
   return 'application/octet-stream';
 }
