@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -125,6 +126,20 @@ function encodeCursor(manifest) {
   return Buffer.from(JSON.stringify({ archivedAt: manifest.archivedAt, jobId: manifest.jobId })).toString('base64url');
 }
 
+function thumbnailTimeMs(manifest) {
+  const events = manifest?.analysis?.events || manifest?.analysis || {};
+  const topMs = Number(events?.eventTiming?.top ?? events?.topMs ?? events?.top);
+  return Number.isFinite(topMs) && topMs >= 0 ? topMs : 500;
+}
+
+function runFfmpeg(args) {
+  return new Promise((resolve, reject) => {
+    const process = spawn('ffmpeg', args, { stdio: 'ignore' });
+    process.once('error', reject);
+    process.once('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exited with ${code}`))));
+  });
+}
+
 function createLibrary({ archiveRoot, password, sessionSecret, cookieSecure = true, authMode = 'tailnet', deleteJob }) {
   const usesPasswordAuth = authMode === 'password';
   const enabled = !usesPasswordAuth || Boolean(password && sessionSecret);
@@ -132,6 +147,61 @@ function createLibrary({ archiveRoot, password, sessionSecret, cookieSecure = tr
 
   function authenticated(request) {
     return enabled && (!usesPasswordAuth || Boolean(readSession(request, sessionSecret)));
+  }
+
+  async function writeManifest(jobId, manifest) {
+    const target = path.join(jobsRoot, jobId, 'manifest.json');
+    const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+    await fs.promises.writeFile(temporary, JSON.stringify(manifest, null, 2), 'utf8');
+    await fs.promises.rename(temporary, target);
+  }
+
+  async function createMissingThumbnail(jobId, manifest) {
+    if (artifactEntry(manifest, 'thumbnail')) return false;
+    const video = artifactEntry(manifest, 'video');
+    if (!video) return false;
+    const jobPath = path.join(jobsRoot, jobId);
+    const sourcePath = path.join(jobPath, 'video', video.filename);
+    const thumbnailDirectory = path.join(jobPath, 'thumbnail');
+    const filename = 'thumbnail.jpg';
+    const outputPath = path.join(thumbnailDirectory, filename);
+    const temporaryPath = `${outputPath}.${process.pid}.next.jpg`;
+    try {
+      await fs.promises.stat(sourcePath);
+      await fs.promises.mkdir(thumbnailDirectory, { recursive: true });
+      await runFfmpeg([
+        '-y', '-ss', (thumbnailTimeMs(manifest) / 1000).toFixed(3), '-i', sourcePath,
+        '-frames:v', '1', '-vf', 'scale=w=720:h=720:force_original_aspect_ratio=decrease', '-q:v', '3', temporaryPath,
+      ]);
+      await fs.promises.rename(temporaryPath, outputPath);
+      const stat = await fs.promises.stat(outputPath);
+      manifest.artifacts = Array.isArray(manifest.artifacts) ? manifest.artifacts : [];
+      manifest.artifacts.push({ artifact: 'thumbnail', filename, originalFilename: filename, size: stat.size });
+      await writeManifest(jobId, manifest);
+      console.info(`[library] backfilled thumbnail for ${jobId}`);
+      return true;
+    } catch (error) {
+      await fs.promises.rm(temporaryPath, { force: true }).catch(() => {});
+      console.warn(`[library] thumbnail backfill skipped for ${jobId}: ${error.message}`);
+      return false;
+    }
+  }
+
+  async function backfillMissingThumbnails() {
+    let entries = [];
+    try {
+      entries = await fs.promises.readdir(jobsRoot, { withFileTypes: true });
+    } catch (error) {
+      if (error.code !== 'ENOENT') console.warn(`[library] thumbnail backfill scan failed: ${error.message}`);
+      return;
+    }
+    let created = 0;
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !safeSegment(entry.name)) continue;
+      const manifest = await readManifest(path.join(jobsRoot, entry.name));
+      if (manifest?.jobId === entry.name && await createMissingThumbnail(entry.name, manifest)) created += 1;
+    }
+    console.info(`[library] thumbnail backfill complete: ${created} created`);
   }
 
   async function listJobs(url) {
@@ -283,6 +353,7 @@ function createLibrary({ archiveRoot, password, sessionSecret, cookieSecure = tr
     return true;
   }
 
+  setImmediate(() => backfillMissingThumbnails());
   return { enabled, handle };
 }
 
