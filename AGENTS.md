@@ -3,10 +3,10 @@
 This folder is part of one multi-repository Raspberry Pi/Hailo project.
 When working here, treat these sibling folders as the same project workspace and inspect them when behavior crosses project boundaries:
 
-- `pi_web`: `/Users/hwangjunguk/Desktop/dir_UK/dir_sandbox/pi_web`
-- `pi_service`: `/Users/hwangjunguk/Desktop/dir_UK/dir_sandbox/pi_service`
-- `pi_camera`: `/Users/hwangjunguk/Desktop/dir_UK/dir_sandbox/pi_camera`
-- `hailo-infer`: `/Users/hwangjunguk/Desktop/dir_UK/dir_sandbox/hailo-infer`
+- `hailo-front`: `/Users/hwangjunguk/Desktop/Ray/UK/hailo-front`
+- `hailo-back`: `/Users/hwangjunguk/Desktop/Ray/UK/hailo-back`
+- `hailo-camera`: `/Users/hwangjunguk/Desktop/Ray/UK/hailo-camera`
+- `hailo-infer`: `/Users/hwangjunguk/Desktop/Ray/UK/hailo-infer`
 
 Before changing API contracts, camera/inference flows, shared configuration, deployment scripts, or integration behavior, check the relevant sibling project paths above instead of reasoning from this folder alone.
 
