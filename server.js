@@ -33,7 +33,7 @@ const analysisCacheDir = process.env.ANALYSIS_CACHE_DIR || path.join(dataDir, 's
 const nasDeletionCursorPath = path.join(dataDir, 'nas-deletion-cursor.json');
 // Keep this contract aligned with hailo-infer's emitted result version. A stale
 // expectation silently bypasses completed-cache reuse and can submit duplicate work.
-const expectedInferAnalysisVersion = process.env.INFER_ANALYSIS_VERSION || 'hailo-coach-service7-v13';
+const expectedInferAnalysisVersion = process.env.INFER_ANALYSIS_VERSION || 'hailo-coach-service7-v14';
 const debugDir = path.join(dataDir, 'debug');
 const inferDebugFrameDir = path.join(debugDir, 'infer-frames');
 const nasThumbnailDir = path.join(debugDir, 'nas-thumbnails');
@@ -1290,6 +1290,7 @@ function buildCoachAnalysisPayload(jobId, status, result) {
     coachSummary: result?.coachSummary ?? result?.coach_summary ?? [],
     coachFindings: result?.coachFindings ?? result?.coach_findings ?? result?.debug?.coachFindings ?? [],
     confidence: result?.confidence ?? null,
+    analysisQuality: result?.analysisQuality ?? null,
     eventValidation: result?.eventValidation ?? null,
     overlay: result?.overlay ?? null,
     meta: result?.meta ?? null,
@@ -1377,6 +1378,7 @@ function normalizeInferResult(jobId, status, result) {
       coachSummary: result.coachSummary ?? result.coach_summary ?? [],
       coachFindings: result.coachFindings ?? result.coach_findings ?? result.debug?.coachFindings ?? [],
       confidence: result.confidence ?? null,
+      analysisQuality: result.analysisQuality ?? null,
       eventValidation: result.eventValidation ?? null,
       overlay: result.overlay ?? null,
       meta: result.meta ?? null,
