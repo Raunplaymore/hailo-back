@@ -5,8 +5,8 @@ const SCHEMA_VERSION = 'swing-tracking-label-v1';
 const EVENT_KEYS = ['address', 'top', 'impact', 'finish'];
 const POINT_KEYS = ['clubHead', 'clubHandle'];
 const VIEWPOINTS = new Set(['unknown', 'down_the_line', 'face_on']);
-const HANDEDNESS = new Set(['unknown', 'right', 'left']);
 const STATUSES = new Set(['draft', 'reviewed']);
+const VISIBILITIES = new Set(['visible', 'occluded', 'out_of_frame', 'unknown']);
 
 function finiteNumber(value) {
   const number = Number(value);
@@ -36,9 +36,23 @@ function sanitizeFrameLabel(value) {
   };
   for (const key of POINT_KEYS) {
     const point = sanitizePoint(value[key]);
-    if (point) result[key] = point;
+    const visibilityKey = `${key}Visibility`;
+    const requestedVisibility = VISIBILITIES.has(value[visibilityKey])
+      ? value[visibilityKey]
+      : 'unknown';
+    if (point) {
+      result[key] = point;
+      result[visibilityKey] = 'visible';
+    } else if (requestedVisibility !== 'unknown' && requestedVisibility !== 'visible') {
+      result[visibilityKey] = requestedVisibility;
+    }
   }
-  return result.clubHead || result.clubHandle ? result : null;
+  return (
+    result.clubHead ||
+    result.clubHandle ||
+    result.clubHeadVisibility ||
+    result.clubHandleVisibility
+  ) ? result : null;
 }
 
 function sanitizeEvent(value) {
@@ -67,7 +81,7 @@ function sanitizeAnnotation(jobId, input) {
     schemaVersion: SCHEMA_VERSION,
     jobId,
     viewpoint: VIEWPOINTS.has(source.viewpoint) ? source.viewpoint : 'unknown',
-    handedness: HANDEDNESS.has(source.handedness) ? source.handedness : 'unknown',
+    handedness: source.handedness === 'left' ? 'left' : 'right',
     status: STATUSES.has(source.status) ? source.status : 'draft',
     events,
     frames: dedupedFrames,

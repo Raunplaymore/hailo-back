@@ -25,6 +25,7 @@ const sanitized = sanitizeAnnotation(jobId, {
       timeMs: 1167,
       clubHead: { x: 0.7, y: 0.4, source: 'manual' },
       clubHandle: { x: 4, y: -1, source: 'model' },
+      clubHandleVisibility: 'occluded',
     },
   ],
   notes: 'validated',
@@ -34,6 +35,10 @@ assert.equal(sanitized.schemaVersion, SCHEMA_VERSION);
 assert.equal(sanitized.events.impact.frame, 35);
 assert.equal(sanitized.frames[0].clubHead.x, 0.7);
 assert.equal(sanitized.frames[0].clubHandle, undefined);
+assert.equal(sanitized.frames[0].clubHeadVisibility, 'visible');
+assert.equal(sanitized.frames[0].clubHandleVisibility, 'occluded');
+assert.equal(sanitizeAnnotation(jobId, {}).handedness, 'right');
+assert.equal(sanitizeAnnotation(jobId, { handedness: 'unknown' }).handedness, 'right');
 
 const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'swing-tracking-'));
 try {
