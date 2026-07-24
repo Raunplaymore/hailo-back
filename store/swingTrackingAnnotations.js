@@ -127,8 +127,37 @@ function createSwingTrackingAnnotationStore({ dataDir }) {
     return annotation;
   }
 
+  async function list() {
+    const entries = await fs.promises.readdir(annotationDir, { withFileTypes: true });
+    const annotations = await Promise.all(entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+      .map(async (entry) => {
+        try {
+          const annotation = JSON.parse(
+            await fs.promises.readFile(path.join(annotationDir, entry.name), 'utf8')
+          );
+          const events = EVENT_KEYS.filter((key) => annotation.events?.[key]).length;
+          return {
+            jobId: annotation.jobId || entry.name.slice(0, -5),
+            status: STATUSES.has(annotation.status) ? annotation.status : 'draft',
+            viewpoint: VIEWPOINTS.has(annotation.viewpoint) ? annotation.viewpoint : 'unknown',
+            handedness: annotation.handedness === 'left' ? 'left' : 'right',
+            labeledFrames: Array.isArray(annotation.frames) ? annotation.frames.length : 0,
+            events,
+            updatedAt: typeof annotation.updatedAt === 'string' ? annotation.updatedAt : null,
+          };
+        } catch {
+          return null;
+        }
+      }));
+    return annotations
+      .filter(Boolean)
+      .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+  }
+
   return {
     annotationDir,
+    list,
     load,
     save,
   };

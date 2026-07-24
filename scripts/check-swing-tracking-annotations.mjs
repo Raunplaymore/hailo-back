@@ -49,6 +49,11 @@ try {
   assert.equal(loaded.updatedAt, saved.updatedAt);
   assert.equal(loaded.status, 'reviewed');
   assert.equal(loaded.frames.length, 1);
+  const listed = await store.list();
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].jobId, jobId);
+  assert.equal(listed[0].labeledFrames, 1);
+  assert.equal(listed[0].events, 1);
 } finally {
   await fs.rm(tempDir, { recursive: true, force: true });
 }

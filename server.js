@@ -3162,6 +3162,20 @@ app.get('/api/debug/infer/:jobId/annotation', async (req, res) => {
   }
 });
 
+app.get('/api/debug/swing-tracking/annotations', async (_req, res) => {
+  try {
+    const annotations = await swingTrackingAnnotations.list();
+    return res.json({
+      ok: true,
+      count: annotations.length,
+      target: 30,
+      annotations,
+    });
+  } catch (error) {
+    return res.status(500).json({ ok: false, message: error.message });
+  }
+});
+
 app.post('/api/debug/infer/:jobId/annotation', async (req, res) => {
   const jobId = req.params.jobId;
   if (!isSafeJobId(jobId)) {
