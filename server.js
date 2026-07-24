@@ -12,6 +12,7 @@ const {
 } = require('./analysis/engine');
 const opencvAnalyzer = require('./analyzers/opencvV1');
 const shotStore = require('./store/shotStore');
+const { createSwingTrackingAnnotationStore } = require('./store/swingTrackingAnnotations');
 const { createNasArchive } = require('./storage/nasArchive');
 
 const app = express();
@@ -37,6 +38,7 @@ const expectedInferAnalysisVersion = process.env.INFER_ANALYSIS_VERSION || 'hail
 const debugDir = path.join(dataDir, 'debug');
 const inferDebugFrameDir = path.join(debugDir, 'infer-frames');
 const nasThumbnailDir = path.join(debugDir, 'nas-thumbnails');
+const swingTrackingAnnotations = createSwingTrackingAnnotationStore({ dataDir });
 const nasArchive = createNasArchive({
   baseUrl: process.env.NAS_ARCHIVE_URL,
   token: process.env.NAS_ARCHIVE_TOKEN,
@@ -660,7 +662,7 @@ function frameTimeMs(frame, index, fps) {
 
 function selectDebugFrames(frames, limit) {
   if (!Array.isArray(frames) || frames.length === 0) return [];
-  const safeLimit = Math.max(1, Math.min(48, Number(limit) || 24));
+  const safeLimit = Math.max(1, Math.min(240, Number(limit) || 120));
   if (frames.length <= safeLimit) {
     return frames.map((frame, index) => ({ frame, index }));
   }
@@ -3026,7 +3028,7 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
     return res.status(400).json({ ok: false, message: 'Invalid jobId' });
   }
 
-  const limit = Math.max(1, Math.min(48, Number(req.query.limit) || 24));
+  const limit = Math.max(1, Math.min(240, Number(req.query.limit) || 120));
   const force = toBoolean(req.query.force);
   const variant = req.query.variant === 'debug' ? 'debug' : 'main';
   const metaPath = resolveDebugMetaPath(jobId, variant);
@@ -3145,6 +3147,37 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
     rejectedLabelCounts,
     frames: debugFrames,
   });
+});
+
+app.get('/api/debug/infer/:jobId/annotation', async (req, res) => {
+  const jobId = req.params.jobId;
+  if (!isSafeJobId(jobId)) {
+    return res.status(400).json({ ok: false, message: 'Invalid jobId' });
+  }
+  try {
+    const annotation = await swingTrackingAnnotations.load(jobId);
+    return res.json({ ok: true, jobId, annotation });
+  } catch (error) {
+    return res.status(500).json({ ok: false, jobId, message: error.message });
+  }
+});
+
+app.post('/api/debug/infer/:jobId/annotation', async (req, res) => {
+  const jobId = req.params.jobId;
+  if (!isSafeJobId(jobId)) {
+    return res.status(400).json({ ok: false, message: 'Invalid jobId' });
+  }
+  try {
+    const annotation = await swingTrackingAnnotations.save(jobId, req.body);
+    return res.json({
+      ok: true,
+      jobId,
+      annotation,
+      annotationPath: path.join(swingTrackingAnnotations.annotationDir, `${jobId}.json`),
+    });
+  } catch (error) {
+    return res.status(500).json({ ok: false, jobId, message: error.message });
+  }
 });
 
 // Deliberately separate from /api/analyze: this creates only temporary
