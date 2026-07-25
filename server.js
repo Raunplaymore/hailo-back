@@ -41,6 +41,7 @@ const expectedInferAnalysisVersion = process.env.INFER_ANALYSIS_VERSION || 'hail
 const debugDir = path.join(dataDir, 'debug');
 const inferDebugFrameDir = path.join(debugDir, 'infer-frames');
 const nasThumbnailDir = path.join(debugDir, 'nas-thumbnails');
+const activeDebugFrameRequests = new Map();
 const swingTrackingAnnotations = createSwingTrackingAnnotationStore({ dataDir });
 const nasArchive = createNasArchive({
   baseUrl: process.env.NAS_ARCHIVE_URL,
@@ -131,9 +132,9 @@ function isDecodeErrorMessage(message) {
   );
 }
 
-async function runCommand(command, args, { timeoutMs = 30_000 } = {}) {
+async function runCommand(command, args, { timeoutMs = 30_000, signal } = {}) {
   return new Promise((resolve, reject) => {
-    const proc = spawn(command, args);
+    const proc = spawn(command, args, signal ? { signal } : undefined);
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
@@ -729,7 +730,7 @@ function validateDebugDetection(det, bodyFrame) {
   return { accepted: true, reason: null, wristDistance: Number(wristDistance.toFixed(4)) };
 }
 
-async function extractDebugFrameImageByTime(videoPath, outPath, timeMs) {
+async function extractDebugFrameImageByTime(videoPath, outPath, timeMs, signal) {
   if (fs.existsSync(outPath)) return;
   const { ffmpeg } = await ensureFfmpegAvailability();
   if (!ffmpeg) {
@@ -753,11 +754,11 @@ async function extractDebugFrameImageByTime(videoPath, outPath, timeMs) {
       '3',
       outPath,
     ],
-    { timeoutMs: 20_000 },
+    { timeoutMs: 20_000, signal },
   );
 }
 
-async function extractDebugFrameImage(videoPath, outPath, { timeMs, frameIndex }) {
+async function extractDebugFrameImage(videoPath, outPath, { timeMs, frameIndex, signal }) {
   if (fs.existsSync(outPath)) return;
   const { ffmpeg } = await ensureFfmpegAvailability();
   if (!ffmpeg) {
@@ -783,14 +784,15 @@ async function extractDebugFrameImage(videoPath, outPath, { timeMs, frameIndex }
           '3',
           outPath,
         ],
-        { timeoutMs: 25_000 },
+        { timeoutMs: 25_000, signal },
       );
       return;
-    } catch {
+    } catch (error) {
       await fs.promises.rm(outPath, { force: true }).catch(() => {});
+      if (signal?.aborted || error?.name === 'AbortError') throw error;
     }
   }
-  await extractDebugFrameImageByTime(videoPath, outPath, timeMs);
+  await extractDebugFrameImageByTime(videoPath, outPath, timeMs, signal);
 }
 
 const PROGRESS_STAGE_META = {
@@ -3025,6 +3027,40 @@ app.get('/api/files/detail', async (_req, res) => {
   }
 });
 
+app.get('/api/debug/infer/:jobId/frames/progress', (req, res) => {
+  const jobId = req.params.jobId;
+  if (!isSafeJobId(jobId)) {
+    return res.status(400).json({ ok: false, message: 'Invalid jobId' });
+  }
+  const limit = Math.max(1, Math.min(240, Number(req.query.limit) || 120));
+  const variant = req.query.variant === 'debug' ? 'debug' : 'main';
+  const key = `${jobId}:${variant}:${limit}`;
+  const current = activeDebugFrameRequests.get(key);
+  if (!current) {
+    return res.json({
+      ok: true,
+      jobId,
+      variant,
+      status: 'idle',
+      completed: 0,
+      total: 0,
+      percent: 0,
+    });
+  }
+  return res.json({
+    ok: true,
+    jobId,
+    variant,
+    status: current.status,
+    completed: current.completed,
+    total: current.total,
+    percent: current.total > 0 ? Math.round((current.completed / current.total) * 100) : 0,
+    currentFrame: current.currentFrame,
+    startedAt: current.startedAt,
+    updatedAt: current.updatedAt,
+  });
+});
+
 app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
   const jobId = req.params.jobId;
   if (!isSafeJobId(jobId)) {
@@ -3034,6 +3070,43 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
   const limit = Math.max(1, Math.min(240, Number(req.query.limit) || 120));
   const force = toBoolean(req.query.force);
   const variant = req.query.variant === 'debug' ? 'debug' : 'main';
+  const requestKey = `${jobId}:${variant}:${limit}`;
+  const existingRequest = activeDebugFrameRequests.get(requestKey);
+  if (existingRequest) {
+    return res.status(409).json({
+      ok: false,
+      jobId,
+      variant,
+      code: 'DEBUG_FRAMES_ALREADY_PROCESSING',
+      message: '동일한 Job의 프레임을 이미 생성하고 있습니다.',
+      status: existingRequest.status,
+      completed: existingRequest.completed,
+      total: existingRequest.total,
+    });
+  }
+
+  const abortController = new AbortController();
+  const requestProgress = {
+    status: 'preparing',
+    completed: 0,
+    total: 0,
+    currentFrame: null,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  activeDebugFrameRequests.set(requestKey, requestProgress);
+  const cancelDisconnectedRequest = () => {
+    if (res.writableEnded) return;
+    requestProgress.status = 'cancelled';
+    requestProgress.updatedAt = new Date().toISOString();
+    abortController.abort();
+    if (activeDebugFrameRequests.get(requestKey) === requestProgress) {
+      activeDebugFrameRequests.delete(requestKey);
+    }
+  };
+  res.once('close', cancelDisconnectedRequest);
+
+  try {
   const metaPath = resolveDebugMetaPath(jobId, variant);
   const sourceVideoPath = resolveDebugVideoPath(jobId);
   if (!metaPath) {
@@ -3087,16 +3160,30 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
   await fs.promises.mkdir(jobFrameDir, { recursive: true });
 
   const selected = selectDebugFrames(frames, limit);
+  requestProgress.status = 'processing';
+  requestProgress.total = selected.length;
+  requestProgress.updatedAt = new Date().toISOString();
   const debugFrames = [];
   const labelCounts = {};
   const rejectedLabelCounts = {};
   for (const { frame, index } of selected) {
+    if (abortController.signal.aborted) {
+      const error = new Error('debug frame request cancelled');
+      error.name = 'AbortError';
+      throw error;
+    }
     const timeMs = frameTimeMs(frame, index, meta?.fps);
     const frameIndex = Number(frame?.frame ?? frame?.frameIndex ?? index);
     const safeFrameIndex = Number.isFinite(frameIndex) ? Math.round(frameIndex) : index;
+    requestProgress.currentFrame = safeFrameIndex;
+    requestProgress.updatedAt = new Date().toISOString();
     const imageName = `frame_${String(index).padStart(5, '0')}_n${String(safeFrameIndex).padStart(5, '0')}_${String(timeMs).padStart(6, '0')}.jpg`;
     const imagePath = path.join(jobFrameDir, imageName);
-    await extractDebugFrameImage(videoPath, imagePath, { timeMs, frameIndex: safeFrameIndex });
+    await extractDebugFrameImage(videoPath, imagePath, {
+      timeMs,
+      frameIndex: safeFrameIndex,
+      signal: abortController.signal,
+    });
     const bodyFrame = bodyFrameByIndex.get(safeFrameIndex) || nearestBodyFrame(safeFrameIndex);
     const rawDetections = (Array.isArray(frame?.detections) ? frame.detections : [])
       .map(normalizeDebugDetection)
@@ -3122,8 +3209,13 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
       rejectedDetections,
       keypoints: bodyFrame?.keypoints || null,
     });
+    requestProgress.completed += 1;
+    requestProgress.updatedAt = new Date().toISOString();
   }
 
+  requestProgress.status = 'succeeded';
+  requestProgress.currentFrame = null;
+  requestProgress.updatedAt = new Date().toISOString();
   return res.json({
     ok: true,
     jobId,
@@ -3150,6 +3242,36 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
     rejectedLabelCounts,
     frames: debugFrames,
   });
+  } catch (error) {
+    if (abortController.signal.aborted || error?.name === 'AbortError') {
+      if (!res.headersSent && !res.destroyed) {
+        return res.status(499).json({
+          ok: false,
+          jobId,
+          variant,
+          code: 'DEBUG_FRAMES_CANCELLED',
+          message: '프레임 생성 요청이 취소되었습니다.',
+        });
+      }
+      return;
+    }
+    requestProgress.status = 'failed';
+    requestProgress.updatedAt = new Date().toISOString();
+    if (!res.headersSent) {
+      return res.status(500).json({
+        ok: false,
+        jobId,
+        variant,
+        code: 'DEBUG_FRAMES_FAILED',
+        message: error?.message || '프레임 생성에 실패했습니다.',
+      });
+    }
+  } finally {
+    res.off('close', cancelDisconnectedRequest);
+    if (activeDebugFrameRequests.get(requestKey) === requestProgress) {
+      activeDebugFrameRequests.delete(requestKey);
+    }
+  }
 });
 
 app.get('/api/debug/infer/:jobId/annotation', async (req, res) => {
