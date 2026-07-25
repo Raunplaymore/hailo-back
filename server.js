@@ -12,7 +12,10 @@ const {
 } = require('./analysis/engine');
 const opencvAnalyzer = require('./analyzers/opencvV1');
 const shotStore = require('./store/shotStore');
-const { createSwingTrackingAnnotationStore } = require('./store/swingTrackingAnnotations');
+const {
+  createSwingTrackingAnnotationStore,
+  validateAnnotationIdentity,
+} = require('./store/swingTrackingAnnotations');
 const { createNasArchive } = require('./storage/nasArchive');
 
 const app = express();
@@ -3180,6 +3183,14 @@ app.post('/api/debug/infer/:jobId/annotation', async (req, res) => {
   const jobId = req.params.jobId;
   if (!isSafeJobId(jobId)) {
     return res.status(400).json({ ok: false, message: 'Invalid jobId' });
+  }
+  const identityError = validateAnnotationIdentity(jobId, req.body);
+  if (identityError) {
+    return res.status(409).json({
+      ok: false,
+      jobId,
+      ...identityError,
+    });
   }
   try {
     const annotation = await swingTrackingAnnotations.save(jobId, req.body);

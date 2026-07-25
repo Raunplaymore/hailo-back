@@ -8,6 +8,28 @@ const VIEWPOINTS = new Set(['unknown', 'down_the_line', 'face_on']);
 const STATUSES = new Set(['draft', 'reviewed']);
 const VISIBILITIES = new Set(['visible', 'occluded', 'out_of_frame', 'unknown']);
 
+function validateAnnotationIdentity(jobId, input) {
+  const source = input && typeof input === 'object' ? input : {};
+  if (typeof source.jobId === 'string' && source.jobId !== jobId) {
+    return {
+      code: 'ANNOTATION_JOB_MISMATCH',
+      message: 'Annotation jobId does not match the requested jobId',
+    };
+  }
+  const metaPath = source.source?.metaPath;
+  if (typeof metaPath === 'string' && metaPath) {
+    const metaFile = path.basename(metaPath);
+    const validMetaFiles = new Set([`${jobId}.meta.json`, `${jobId}.debug.meta.json`]);
+    if (!validMetaFiles.has(metaFile)) {
+      return {
+        code: 'ANNOTATION_SOURCE_MISMATCH',
+        message: 'Annotation metaPath belongs to a different jobId',
+      };
+    }
+  }
+  return null;
+}
+
 function finiteNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
@@ -167,4 +189,5 @@ module.exports = {
   SCHEMA_VERSION,
   createSwingTrackingAnnotationStore,
   sanitizeAnnotation,
+  validateAnnotationIdentity,
 };

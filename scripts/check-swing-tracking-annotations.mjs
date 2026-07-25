@@ -9,6 +9,7 @@ const {
   SCHEMA_VERSION,
   createSwingTrackingAnnotationStore,
   sanitizeAnnotation,
+  validateAnnotationIdentity,
 } = require('../store/swingTrackingAnnotations');
 
 const jobId = 'b37c4701-2327-46e7-8011-1cbbc44c9084';
@@ -39,6 +40,18 @@ assert.equal(sanitized.frames[0].clubHeadVisibility, 'visible');
 assert.equal(sanitized.frames[0].clubHandleVisibility, 'occluded');
 assert.equal(sanitizeAnnotation(jobId, {}).handedness, 'right');
 assert.equal(sanitizeAnnotation(jobId, { handedness: 'unknown' }).handedness, 'right');
+assert.equal(validateAnnotationIdentity(jobId, sanitized), null);
+assert.equal(
+  validateAnnotationIdentity(jobId, { ...sanitized, jobId: 'different-job' }).code,
+  'ANNOTATION_JOB_MISMATCH'
+);
+assert.equal(
+  validateAnnotationIdentity(jobId, {
+    ...sanitized,
+    source: { ...sanitized.source, metaPath: '/tmp/different-job.meta.json' },
+  }).code,
+  'ANNOTATION_SOURCE_MISMATCH'
+);
 
 const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'swing-tracking-'));
 try {
