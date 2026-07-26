@@ -2384,6 +2384,15 @@ app.post('/api/analyze/from-file', async (req, res) => {
     toBoolean(payload.force) ||
     payload.options?.force === true ||
     toBoolean(payload.options?.force);
+  const requireVideo =
+    payload.requireVideo === true ||
+    toBoolean(payload.requireVideo) ||
+    source.requireVideo === true ||
+    toBoolean(source.requireVideo);
+  const club =
+    typeof payload.options?.club === 'string' && payload.options.club.trim()
+      ? payload.options.club.trim()
+      : null;
   if (!providedJobId) {
     return res.status(400).json({ ok: false, message: 'jobId is required' });
   }
@@ -2395,7 +2404,8 @@ app.post('/api/analyze/from-file', async (req, res) => {
   if (!isSupportedVideoExt(targetFilename)) {
     return res.status(400).json({ ok: false, message: 'Only .mp4/.mov is supported' });
   }
-  if (!resolveUploadPath(targetFilename)) {
+  const resolvedVideoPath = resolveUploadPath(targetFilename);
+  if (!resolvedVideoPath) {
     return res.status(400).json({ ok: false, message: 'Invalid file path' });
   }
   const resolvedMetaPath = resolveMetaPath(metaPathInput, providedJobId);
@@ -2407,6 +2417,42 @@ app.post('/api/analyze/from-file', async (req, res) => {
     metaPath: resolvedMetaPath,
     clubPath: resolvedMetaPath,
   });
+
+  if (requireVideo) {
+    const videoStat = await fsp.stat(resolvedVideoPath).catch(() => null);
+    if (!videoStat?.isFile() || videoStat.size <= 0) {
+      const errorCode = videoStat ? 'VIDEO_EMPTY' : 'VIDEO_MISSING';
+      const errorMessage = videoStat
+        ? `video file is empty: ${resolvedVideoPath}`
+        : `video file not found: ${resolvedVideoPath}`;
+      const analysis = {
+        ...buildInferErrorAnalysis(providedJobId, errorMessage),
+        errorCode,
+      };
+      progress = buildAnalysisProgress('failed', {
+        analysisPath: 'infer',
+        metaPath: resolvedMetaPath,
+        message: errorMessage,
+      });
+      writeAnalysisCache(providedJobId, {
+        status: 'failed',
+        analysis,
+        errorCode,
+        errorMessage,
+        metaPath: resolvedMetaPath,
+        progress,
+      });
+      return res.json({
+        ok: true,
+        jobId: providedJobId,
+        filename: targetFilename,
+        status: 'failed',
+        errorCode,
+        errorMessage,
+        progress,
+      });
+    }
+  }
 
   const cached = readAnalysisCache(providedJobId);
   const cachedAgeMs = cached?.updatedAt ? Date.now() - Date.parse(cached.updatedAt) : Number.POSITIVE_INFINITY;
@@ -2479,7 +2525,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
     });
   }
 
-  const videoPath = path.join(uploadDir, targetFilename);
+  const videoPath = resolvedVideoPath;
   const requestBody = {
     mode: 'coach_from_meta',
     jobId: providedJobId,
@@ -2489,7 +2535,10 @@ app.post('/api/analyze/from-file', async (req, res) => {
       metaPath: resolvedMetaPath,
       bodyPath: bodyArtifactPath(providedJobId),
     },
-    options: { force: Boolean(force) },
+    options: {
+      force: Boolean(force),
+      ...(club ? { club } : {}),
+    },
   };
 
   progress = buildGroupedProgress('fusion_running', {
