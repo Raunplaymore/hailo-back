@@ -34,6 +34,7 @@ const cameraBaseUrl = process.env.CAMERA_BASE_URL || 'http://127.0.0.1:3001';
 const bodyAnalyzerBaseUrl = process.env.BODY_ANALYZER_BASE_URL || inferBaseUrl;
 const inferAnalysisDir = path.join(dataDir, 'analysis');
 const analysisCacheDir = process.env.ANALYSIS_CACHE_DIR || path.join(dataDir, 'service-analysis-cache');
+const persistentMetaDir = process.env.PERSISTENT_META_DIR || path.join(dataDir, 'meta');
 const nasDeletionCursorPath = path.join(dataDir, 'nas-deletion-cursor.json');
 // Keep this contract aligned with hailo-infer's emitted result version. A stale
 // expectation silently bypasses completed-cache reuse and can submit duplicate work.
@@ -56,6 +57,7 @@ fs.mkdirSync(uploadDir, { recursive: true });
 fs.mkdirSync(dataDir, { recursive: true });
 fs.mkdirSync(inferAnalysisDir, { recursive: true });
 fs.mkdirSync(analysisCacheDir, { recursive: true });
+fs.mkdirSync(persistentMetaDir, { recursive: true });
 fs.mkdirSync(inferDebugFrameDir, { recursive: true });
 fs.mkdirSync(nasThumbnailDir, { recursive: true });
 fs.mkdirSync(healthDir, { recursive: true });
@@ -536,6 +538,49 @@ function resolveMetaPath(metaPath, jobId) {
   return target;
 }
 
+function persistentMetaPath(jobId, variant = 'main') {
+  if (!isSafeJobId(jobId)) return null;
+  const suffix = variant === 'debug' ? '.debug.meta.json' : '.meta.json';
+  return path.join(persistentMetaDir, `${jobId}${suffix}`);
+}
+
+function persistMetaArtifact(jobId, sourceMetaPath, variant = 'main') {
+  const target = persistentMetaPath(jobId, variant);
+  const source = resolveMetaPath(sourceMetaPath, jobId);
+  if (!target || !source || !fs.existsSync(source)) return null;
+  try {
+    const payload = JSON.parse(fs.readFileSync(source, 'utf8'));
+    if (!Array.isArray(payload?.frames) || payload.frames.length === 0) return null;
+    const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify(payload), 'utf8');
+    fs.renameSync(temporary, target);
+    return target;
+  } catch (error) {
+    console.warn(`[meta] unable to persist ${jobId}: ${error.message}`);
+    return null;
+  }
+}
+
+async function restoreMetaArtifactFromNas(jobId, variant = 'main') {
+  if (variant !== 'main' || !nasArchive.enabled || !isSafeJobId(jobId)) return null;
+  const target = persistentMetaPath(jobId, variant);
+  if (!target) return null;
+  try {
+    const response = await nasArchive.downloadArtifact(jobId, 'meta', 'meta.json');
+    if (!response) return null;
+    const payload = JSON.parse(await response.text());
+    if (!Array.isArray(payload?.frames) || payload.frames.length === 0) return null;
+    const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+    await fs.promises.writeFile(temporary, JSON.stringify(payload), 'utf8');
+    await fs.promises.rename(temporary, target);
+    console.info(`[meta] restored ${jobId} from NAS archive`);
+    return target;
+  } catch (error) {
+    console.warn(`[meta] unable to restore ${jobId} from NAS: ${error.message}`);
+    return null;
+  }
+}
+
 async function waitForFile(filePath, timeoutMs = 2000) {
   if (!filePath) return false;
   const startedAt = Date.now();
@@ -627,6 +672,8 @@ async function hydrateOverlayFromBodyArtifact(analysis, bodyPath) {
 }
 
 function resolveDebugMetaPath(jobId, variant) {
+  const persistentPath = persistentMetaPath(jobId, variant);
+  if (persistentPath && fs.existsSync(persistentPath)) return persistentPath;
   if (variant === 'debug') {
     const debugMetaPath = resolveMetaPath(path.join(metaDir, `${jobId}.debug.meta.json`), jobId);
     if (debugMetaPath && fs.existsSync(debugMetaPath)) return debugMetaPath;
@@ -948,9 +995,12 @@ function mergeAnalysisCache(jobId, patch) {
 function writeAnalysisCache(jobId, cache, { scheduleArchive = true } = {}) {
   const cachePath = analysisCachePath(jobId);
   if (!cachePath || !cache) return null;
+  const sourceMetaPath = cache.metaPath || cache.progress?.metaPath;
+  const persistedMetaPath = persistMetaArtifact(jobId, sourceMetaPath);
   const payload = {
     jobId,
     ...cache,
+    persistentMetaPath: persistedMetaPath || cache.persistentMetaPath || null,
     updatedAt: new Date().toISOString(),
   };
   // A poller, upload request, and NAS status callback may all update this file.
@@ -1015,7 +1065,13 @@ function queueNasArchive(cache, { force = false } = {}) {
   const current = cache.nasArchive && typeof cache.nasArchive === 'object' ? cache.nasArchive : {};
   if (!force && (isNasArchiveComplete(current) || ['pending', 'uploading', 'retrying'].includes(current.state))) return false;
   const shot = shotStore.getShotByJobId(cache.jobId);
-  const metaPath = cache.metaPath || cache.progress?.metaPath || shot?.metadata?.metaPath;
+  const durableMetaPath = persistentMetaPath(cache.jobId);
+  const metaPath =
+    cache.persistentMetaPath ||
+    (durableMetaPath && fs.existsSync(durableMetaPath) ? durableMetaPath : null) ||
+    cache.metaPath ||
+    cache.progress?.metaPath ||
+    shot?.metadata?.metaPath;
   const bodyPath = cache.progress?.bodyPath || bodyArtifactPath(cache.jobId);
   const artifacts = [
     { artifact: 'video', filePath: resolveDebugVideoPath(cache.jobId) },
@@ -3156,7 +3212,7 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
   res.once('close', cancelDisconnectedRequest);
 
   try {
-  const metaPath = resolveDebugMetaPath(jobId, variant);
+  let metaPath = resolveDebugMetaPath(jobId, variant);
   const sourceVideoPath = resolveDebugVideoPath(jobId);
   if (!metaPath) {
     return res.status(404).json({ ok: false, message: 'meta not found', jobId });
@@ -3177,8 +3233,16 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
     }
   }
 
-  const meta = await readJsonFile(metaPath);
-  const frames = Array.isArray(meta?.frames) ? meta.frames : [];
+  let meta = await readJsonFile(metaPath);
+  let frames = Array.isArray(meta?.frames) ? meta.frames : [];
+  if (!frames.length) {
+    const restoredMetaPath = await restoreMetaArtifactFromNas(jobId, variant);
+    if (restoredMetaPath) {
+      metaPath = restoredMetaPath;
+      meta = await readJsonFile(metaPath);
+      frames = Array.isArray(meta?.frames) ? meta.frames : [];
+    }
+  }
   if (!frames.length) {
     return res.status(404).json({ ok: false, message: 'meta frames missing', jobId, metaPath });
   }

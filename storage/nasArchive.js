@@ -175,7 +175,22 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
     return response.json();
   }
 
-  return { enabled, schedule, deleteJob, listDeletions, acknowledgeDeletion, isPending: (jobId, status) => pending.has(`${jobId}:${status}`) };
+  async function downloadArtifact(jobId, artifact, filename) {
+    if (!enabled || !jobId || !artifact || !filename) return null;
+    return request(
+      `/v1/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(artifact)}/${encodeURIComponent(filename)}`,
+    );
+  }
+
+  return {
+    enabled,
+    schedule,
+    deleteJob,
+    listDeletions,
+    acknowledgeDeletion,
+    downloadArtifact,
+    isPending: (jobId, status) => pending.has(`${jobId}:${status}`),
+  };
 }
 
 module.exports = { createNasArchive };
