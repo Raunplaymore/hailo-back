@@ -8,6 +8,14 @@ const VIEWPOINTS = new Set(['unknown', 'down_the_line', 'face_on']);
 const STATUSES = new Set(['draft', 'reviewed']);
 const VISIBILITIES = new Set(['visible', 'occluded', 'out_of_frame', 'unknown']);
 
+function thumbnailUrl(dataDir, jobId) {
+  if (typeof jobId !== 'string' || !/^[a-zA-Z0-9._-]+$/.test(jobId)) return null;
+  const thumbnailPath = path.join(dataDir, 'debug', 'nas-thumbnails', `${jobId}.jpg`);
+  return fs.existsSync(thumbnailPath)
+    ? `/debug/nas-thumbnails/${encodeURIComponent(jobId)}.jpg`
+    : null;
+}
+
 function validateAnnotationIdentity(jobId, input) {
   const source = input && typeof input === 'object' ? input : {};
   if (typeof source.jobId === 'string' && source.jobId !== jobId) {
@@ -102,7 +110,7 @@ function sanitizeAnnotation(jobId, input) {
   return {
     schemaVersion: SCHEMA_VERSION,
     jobId,
-    viewpoint: VIEWPOINTS.has(source.viewpoint) ? source.viewpoint : 'unknown',
+    viewpoint: VIEWPOINTS.has(source.viewpoint) ? source.viewpoint : 'down_the_line',
     handedness: source.handedness === 'left' ? 'left' : 'right',
     status: STATUSES.has(source.status) ? source.status : 'draft',
     events,
@@ -162,11 +170,12 @@ function createSwingTrackingAnnotationStore({ dataDir }) {
           return {
             jobId: annotation.jobId || entry.name.slice(0, -5),
             status: STATUSES.has(annotation.status) ? annotation.status : 'draft',
-            viewpoint: VIEWPOINTS.has(annotation.viewpoint) ? annotation.viewpoint : 'unknown',
+            viewpoint: VIEWPOINTS.has(annotation.viewpoint) ? annotation.viewpoint : 'down_the_line',
             handedness: annotation.handedness === 'left' ? 'left' : 'right',
             labeledFrames: Array.isArray(annotation.frames) ? annotation.frames.length : 0,
             events,
             updatedAt: typeof annotation.updatedAt === 'string' ? annotation.updatedAt : null,
+            thumbnailUrl: thumbnailUrl(dataDir, annotation.jobId || entry.name.slice(0, -5)),
           };
         } catch {
           return null;
