@@ -452,6 +452,7 @@ function mapShotToFileEntry(shot) {
     createdAt: shot.createdAt,
     sourceType: shot.sourceType || 'upload',
     videoUrl: uploadsUrl(shot.media?.filename),
+    thumbnailUrl: localThumbnailUrl(shot.jobId),
     analysis,
     progress: analysis?.progress || shot.progress || null,
   };
@@ -642,6 +643,14 @@ function readAnalysisCache(jobId) {
 
 function isSafeJobId(jobId) {
   return typeof jobId === 'string' && jobId.length > 0 && !jobId.includes('/') && !jobId.includes('\\');
+}
+
+function localThumbnailUrl(jobId) {
+  if (!isSafeJobId(jobId)) return null;
+  const thumbnailPath = path.join(nasThumbnailDir, `${jobId}.jpg`);
+  return fs.existsSync(thumbnailPath)
+    ? `/debug/nas-thumbnails/${encodeURIComponent(jobId)}.jpg`
+    : null;
 }
 
 async function readJsonFile(filePath) {
@@ -3110,6 +3119,7 @@ app.get('/api/files/detail', async (_req, res) => {
         return {
           filename,
           url: uploadsUrl(filename),
+          thumbnailUrl: localThumbnailUrl(cacheJobId),
           shotId: shot?.id || null,
           jobId: shot?.jobId || cached?.jobId || derivedJobId,
           analyzed: effectiveStatus === 'succeeded',
