@@ -42,6 +42,7 @@ const expectedInferAnalysisVersion = process.env.INFER_ANALYSIS_VERSION || 'hail
 const debugDir = path.join(dataDir, 'debug');
 const inferDebugFrameDir = path.join(debugDir, 'infer-frames');
 const nasThumbnailDir = path.join(debugDir, 'nas-thumbnails');
+const swingTrackingArchiveDir = path.join(dataDir, 'annotations', 'swing-tracking-archive');
 const activeDebugFrameRequests = new Map();
 const swingTrackingAnnotations = createSwingTrackingAnnotationStore({ dataDir });
 const nasArchive = createNasArchive({
@@ -60,6 +61,7 @@ fs.mkdirSync(analysisCacheDir, { recursive: true });
 fs.mkdirSync(persistentMetaDir, { recursive: true });
 fs.mkdirSync(inferDebugFrameDir, { recursive: true });
 fs.mkdirSync(nasThumbnailDir, { recursive: true });
+fs.mkdirSync(swingTrackingArchiveDir, { recursive: true });
 fs.mkdirSync(healthDir, { recursive: true });
 
 // Configure multer storage: timestamp prefix keeps uploads unique
@@ -1162,6 +1164,65 @@ async function queueLabNasArchive({ jobId, inputPath, sourceVideoPath, bodyPath,
   });
   if (scheduled) writeStatus({ state: 'pending', attempt: 0, error: null });
   return { state: scheduled ? 'pending' : 'not_scheduled', archiveJobId, recordPath };
+}
+
+function swingTrackingArchiveRecordPath(jobId) {
+  return path.join(swingTrackingArchiveDir, `${jobId}.json`);
+}
+
+function writeSwingTrackingArchiveStatus(jobId, archiveJobId, archive) {
+  const recordPath = swingTrackingArchiveRecordPath(jobId);
+  const record = {
+    archiveJobId,
+    sourceJobId: jobId,
+    archive,
+    updatedAt: new Date().toISOString(),
+  };
+  const temporary = `${recordPath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(record, null, 2), 'utf8');
+  fs.renameSync(temporary, recordPath);
+  return record;
+}
+
+function queueSwingTrackingAnnotationArchive(jobId, annotationPath, annotation) {
+  const archiveJobId = `annotation-${jobId}`;
+  if (!nasArchive.enabled) {
+    return {
+      state: 'disabled',
+      archiveJobId,
+      error: 'NAS archive is not configured',
+    };
+  }
+  const scheduled = nasArchive.schedule({
+    jobId: archiveJobId,
+    status: 'done',
+    shot: null,
+    cache: null,
+    artifacts: [{ artifact: 'annotation', filePath: annotationPath }],
+    manifest: {
+      archiveKind: 'swing_tracking_annotation',
+      swingTracking: {
+        sourceJobId: jobId,
+        schemaVersion: annotation?.schemaVersion || null,
+        status: annotation?.status || null,
+        updatedAt: annotation?.updatedAt || null,
+      },
+    },
+    onStatus: (archive) => writeSwingTrackingArchiveStatus(jobId, archiveJobId, archive),
+  });
+  if (scheduled) {
+    writeSwingTrackingArchiveStatus(jobId, archiveJobId, {
+      state: 'pending',
+      attempt: 0,
+      retryAt: null,
+      error: null,
+    });
+  }
+  return {
+    state: scheduled ? 'pending' : 'not_scheduled',
+    archiveJobId,
+    recordPath: swingTrackingArchiveRecordPath(jobId),
+  };
 }
 
 function resumeNasArchiveQueue() {
@@ -3444,11 +3505,14 @@ app.post('/api/debug/infer/:jobId/annotation', async (req, res) => {
   }
   try {
     const annotation = await swingTrackingAnnotations.save(jobId, req.body);
+    const annotationPath = path.join(swingTrackingAnnotations.annotationDir, `${jobId}.json`);
+    const archive = queueSwingTrackingAnnotationArchive(jobId, annotationPath, annotation);
     return res.json({
       ok: true,
       jobId,
       annotation,
-      annotationPath: path.join(swingTrackingAnnotations.annotationDir, `${jobId}.json`),
+      annotationPath,
+      archive,
     });
   } catch (error) {
     return res.status(500).json({ ok: false, jobId, message: error.message });
