@@ -1,8 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 
-const SCHEMA_VERSION = 'swing-tracking-label-v1';
-const EVENT_KEYS = ['address', 'top', 'impact', 'finish'];
+const SCHEMA_VERSION = 'swing-tracking-label-v2';
+const EVENT_KEYS = ['address', 'takeaway', 'top', 'impact', 'finish'];
 const POINT_KEYS = ['clubHead', 'clubHandle'];
 const VIEWPOINTS = new Set(['unknown', 'down_the_line', 'face_on']);
 const STATUSES = new Set(['draft', 'reviewed']);

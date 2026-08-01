@@ -95,13 +95,14 @@ GET /api/analyze/session-123
   "errorMessage": null,
   "events": {
     "addressMs": 0,
+    "takeawayMs": 240,
     "topMs": 820,
     "impactMs": 1220,
     "finishMs": 1600
   },
   "metrics": {
     "swingPlane": { "label": "inside-out", "confidence": 0.62 },
-    "tempo": { "backswingMs": 820, "downswingMs": 400, "ratio": 2.05 },
+    "tempo": { "backswingMs": 580, "downswingMs": 400, "ratio": 1.45 },
     "impactStability": { "label": "stable", "score": 0.74 }
   },
   "summary": "Swing plane inside-out. Impact stability stable. Tempo 2.05:1."

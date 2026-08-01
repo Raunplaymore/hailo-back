@@ -407,6 +407,7 @@ function buildJobAnalysisPayload(shot) {
     errorCode: analysis?.errorCode ?? null,
     events: {
       address: null,
+      takeaway: null,
       top: null,
       impact: analysis?.events?.impact,
       finish: null,
@@ -419,6 +420,7 @@ function buildJobAnalysisPayload(shot) {
       },
       eventTiming: {
         address: null,
+        takeaway: null,
         top: null,
         impact: analysis?.events?.impact?.timeMs ?? null,
         finish: null,
@@ -1325,6 +1327,7 @@ function buildCoachAnalysisPayload(jobId, status, result) {
     errorCode: result?.errorCode ?? null,
     events: {
       address: eventObject('address'),
+      takeaway: eventObject('takeaway'),
       top: eventObject('top'),
       impact: eventObject('impact') || (impactMs !== null ? { timeMs: impactMs } : null),
       finish: eventObject('finish'),
@@ -1337,6 +1340,7 @@ function buildCoachAnalysisPayload(jobId, status, result) {
       },
       eventTiming: {
         address: eventValue('address'),
+        takeaway: eventValue('takeaway'),
         top: eventValue('top'),
         impact: eventValue('impact'),
         finish: eventValue('finish'),
@@ -1382,7 +1386,7 @@ function hasUsableInferMetrics(result) {
   const hasEvent =
     events &&
     typeof events === 'object' &&
-    ['address', 'top', 'impact', 'finish', 'addressMs', 'topMs', 'impactMs', 'finishMs'].some(
+    ['address', 'takeaway', 'top', 'impact', 'finish', 'addressMs', 'takeawayMs', 'topMs', 'impactMs', 'finishMs'].some(
       (key) => events[key] !== null && events[key] !== undefined,
     );
   const eventsWithheldForQuality = result.eventValidation?.status === 'withheld';
@@ -1486,13 +1490,14 @@ function buildInferErrorAnalysis(jobId, errorMessage) {
     errorCode: 'INFER_UNAVAILABLE',
     events: {
       address: null,
+      takeaway: null,
       top: null,
       impact: null,
       finish: null,
     },
     metrics: {
       tempo: { backswingMs: null, downswingMs: null, ratio: null },
-      eventTiming: { address: null, top: null, impact: null, finish: null },
+      eventTiming: { address: null, takeaway: null, top: null, impact: null, finish: null },
       ball: { launchDirection: 'unknown', launchAngle: null, speedRelative: 'unknown' },
     },
     pending: DEFAULT_PENDING_ITEMS,

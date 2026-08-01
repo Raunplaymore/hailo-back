@@ -6,13 +6,13 @@ const {
 } = require('./track_utils');
 
 function computeTempo(events) {
-  const addressMs = events?.addressMs;
+  const takeawayMs = events?.takeawayMs ?? events?.addressMs;
   const topMs = events?.topMs;
   const impactMs = events?.impactMs;
-  if (!Number.isFinite(addressMs) || !Number.isFinite(topMs) || !Number.isFinite(impactMs)) {
+  if (!Number.isFinite(takeawayMs) || !Number.isFinite(topMs) || !Number.isFinite(impactMs)) {
     return { backswingMs: null, downswingMs: null, ratio: null };
   }
-  const backswingMs = Math.max(0, topMs - addressMs);
+  const backswingMs = Math.max(0, topMs - takeawayMs);
   const downswingMs = Math.max(0, impactMs - topMs);
   if (!backswingMs || !downswingMs) {
     return { backswingMs: null, downswingMs: null, ratio: null };
