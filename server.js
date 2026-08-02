@@ -1893,6 +1893,14 @@ function summarizeDtlClubPointsV2(result, metaPath, durationMs) {
   };
 }
 
+// V2 queue transitions are transient operational state. Archive only the
+// completed sidecar below, not every queued/running update in a batch.
+function updateDtlClubPointsV2Cache(jobId, sidecar) {
+  const cache = readAnalysisCache(jobId);
+  if (!cache) return null;
+  return writeAnalysisCache(jobId, { ...cache, dtlClubPointsV2: sidecar }, { scheduleArchive: false });
+}
+
 function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
   const cache = readAnalysisCache(jobId);
   if (!cache || cache.status !== 'done') return { scheduled: false, reason: 'primary analysis unavailable' };
@@ -1903,8 +1911,8 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
     return { scheduled: false, reason: current?.status || 'already scheduled' };
   }
 
-  mergeAnalysisCache(jobId, {
-    dtlClubPointsV2: { status: 'queued', model: 'dtl_club_points_v2', queuedAt: new Date().toISOString() },
+  updateDtlClubPointsV2Cache(jobId, {
+    status: 'queued', model: 'dtl_club_points_v2', queuedAt: new Date().toISOString(),
   });
   const run = dtlClubPointsV2Tail.then(async () => {
     const latest = readAnalysisCache(jobId);
@@ -1912,7 +1920,7 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
     let inputPath = shot?.metadata?.analysisInput?.path || shot?.media?.path;
     const bodyPath = latest?.progress?.bodyPath || shot?.metadata?.bodyPath || bodyArtifactPath(jobId);
     if (!inputPath || !fs.existsSync(inputPath)) {
-      mergeAnalysisCache(jobId, { dtlClubPointsV2: { status: 'failed', error: 'analysis input unavailable' } });
+      updateDtlClubPointsV2Cache(jobId, { status: 'failed', error: 'analysis input unavailable' });
       return;
     }
     // Upload analysis normally leaves a converted MP4 in analysisInput. Legacy
@@ -1922,13 +1930,13 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
     if (path.extname(inputPath).toLowerCase() === '.mov') {
       const prepared = await prepareVideoForAnalysis(inputPath, shot?.media?.filename || path.basename(inputPath));
       if (!prepared.ok || !prepared.path) {
-        mergeAnalysisCache(jobId, { dtlClubPointsV2: { status: 'failed', error: 'DTL V2 video preparation failed' } });
+        updateDtlClubPointsV2Cache(jobId, { status: 'failed', error: 'DTL V2 video preparation failed' });
         return;
       }
       inputPath = prepared.path;
     }
-    mergeAnalysisCache(jobId, {
-      dtlClubPointsV2: { status: 'running', model: 'dtl_club_points_v2', startedAt: new Date().toISOString() },
+    updateDtlClubPointsV2Cache(jobId, {
+      status: 'running', model: 'dtl_club_points_v2', startedAt: new Date().toISOString(),
     });
     const videoMeta = await getVideoMeta(inputPath);
     const generated = await requestDtlClubPointsV2MetaGeneration({
@@ -1939,13 +1947,13 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
       videoMeta,
     });
     if (!generated) {
-      mergeAnalysisCache(jobId, { dtlClubPointsV2: { status: 'failed', error: 'DTL V2 meta generation failed' } });
+      updateDtlClubPointsV2Cache(jobId, { status: 'failed', error: 'DTL V2 meta generation failed' });
       return;
     }
     const result = await requestDtlClubPointsV2SidecarAnalysis({ jobId, metaPath: generated.metaPath, bodyPath });
     if (!result) {
-      mergeAnalysisCache(jobId, {
-        dtlClubPointsV2: { status: 'failed', metaPath: generated.metaPath, error: 'DTL V2 sidecar analysis failed' },
+      updateDtlClubPointsV2Cache(jobId, {
+        status: 'failed', metaPath: generated.metaPath, error: 'DTL V2 sidecar analysis failed',
       });
       return;
     }
@@ -1977,7 +1985,7 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
   });
   dtlClubPointsV2Tail = run.catch((error) => {
     console.warn(`[dtl-v2-sidecar] ${jobId} failed: ${error.message}`);
-    mergeAnalysisCache(jobId, { dtlClubPointsV2: { status: 'failed', error: error.message } });
+    updateDtlClubPointsV2Cache(jobId, { status: 'failed', error: error.message });
   });
   return { scheduled: true, reason: 'queued' };
 }
