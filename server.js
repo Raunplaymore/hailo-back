@@ -1904,11 +1904,23 @@ function scheduleDtlClubPointsV2Sidecar(jobId) {
   const run = dtlClubPointsV2Tail.then(async () => {
     const latest = readAnalysisCache(jobId);
     const shot = shotStore.getShotByJobId(jobId);
-    const inputPath = shot?.metadata?.analysisInput?.path || shot?.media?.path;
+    let inputPath = shot?.metadata?.analysisInput?.path || shot?.media?.path;
     const bodyPath = latest?.progress?.bodyPath || shot?.metadata?.bodyPath || bodyArtifactPath(jobId);
     if (!inputPath || !fs.existsSync(inputPath)) {
       mergeAnalysisCache(jobId, { dtlClubPointsV2: { status: 'failed', error: 'analysis input unavailable' } });
       return;
+    }
+    // Upload analysis normally leaves a converted MP4 in analysisInput. Legacy
+    // re-analysis may only have the original MOV, while camera file inference
+    // deliberately accepts MP4/H264/JPEG inputs. Reuse the same preparation
+    // path rather than weakening the camera's input allowlist.
+    if (path.extname(inputPath).toLowerCase() === '.mov') {
+      const prepared = await prepareVideoForAnalysis(inputPath, shot?.media?.filename || path.basename(inputPath));
+      if (!prepared.ok || !prepared.path) {
+        mergeAnalysisCache(jobId, { dtlClubPointsV2: { status: 'failed', error: 'DTL V2 video preparation failed' } });
+        return;
+      }
+      inputPath = prepared.path;
     }
     mergeAnalysisCache(jobId, {
       dtlClubPointsV2: { status: 'running', model: 'dtl_club_points_v2', startedAt: new Date().toISOString() },
