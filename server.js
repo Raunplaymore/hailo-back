@@ -44,6 +44,7 @@ const inferDebugFrameDir = path.join(debugDir, 'infer-frames');
 const nasThumbnailDir = path.join(debugDir, 'nas-thumbnails');
 const swingTrackingArchiveDir = path.join(dataDir, 'annotations', 'swing-tracking-archive');
 const SWING_EVENT_KEYS = ['address', 'takeaway', 'top', 'impact', 'finish'];
+const DTL_V2_STALE_RUNNING_MS = 10 * 60 * 1000;
 const activeDebugFrameRequests = new Map();
 const swingTrackingAnnotations = createSwingTrackingAnnotationStore({ dataDir });
 const nasArchive = createNasArchive({
@@ -1901,13 +1902,24 @@ function updateDtlClubPointsV2Cache(jobId, sidecar) {
   return writeAnalysisCache(jobId, { ...cache, dtlClubPointsV2: sidecar }, { scheduleArchive: false });
 }
 
+function isStaleDtlClubPointsV2Run(sidecar, nowMs = Date.now()) {
+  if (sidecar?.status !== 'running' || typeof sidecar.startedAt !== 'string') return false;
+  const startedAtMs = Date.parse(sidecar.startedAt);
+  return Number.isFinite(startedAtMs) && nowMs - startedAtMs > DTL_V2_STALE_RUNNING_MS;
+}
+
 function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
   const cache = readAnalysisCache(jobId);
   if (!cache || cache.status !== 'done') return { scheduled: false, reason: 'primary analysis unavailable' };
   const current = cache.dtlClubPointsV2;
-  // `force` is used only to resume queued work after a backend restart. Never
-  // duplicate a sidecar that has actually started running.
-  if (current?.status === 'running' || (!force && ['queued', 'succeeded'].includes(current?.status))) {
+  const staleRunning = isStaleDtlClubPointsV2Run(current);
+  // `force` resumes queued work after a backend restart or a stale (10+ min)
+  // running state. It never reprocesses a completed sidecar or a live worker.
+  if (
+    current?.status === 'succeeded'
+    || (current?.status === 'queued' && !force)
+    || (current?.status === 'running' && !(force && staleRunning))
+  ) {
     return { scheduled: false, reason: current?.status || 'already scheduled' };
   }
 
