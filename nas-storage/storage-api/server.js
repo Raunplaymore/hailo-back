@@ -11,6 +11,7 @@ const validArtifacts = new Set([
   'lab-input-video', 'lab-contrast-video', 'lab-wrist-roi-video',
   'lab-body', 'lab-score', 'lab-run', 'lab-variants',
   'lab-source-meta', 'lab-contrast-meta', 'lab-wrist-roi-meta',
+  'dataset-zip', 'dataset-manifest', 'event-training-manifest', 'split-manifest', 'data-config',
 ]);
 const libraryPassword = process.env.LIBRARY_PASSWORD;
 const librarySessionSecret = process.env.LIBRARY_SESSION_SECRET;
