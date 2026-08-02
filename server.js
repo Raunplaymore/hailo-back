@@ -1225,6 +1225,43 @@ function queueSwingTrackingAnnotationArchive(jobId, annotationPath, annotation) 
   };
 }
 
+function queueSwingTrackingDatasetArchive(version) {
+  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(version)) {
+    throw new Error('Invalid dataset version');
+  }
+  const datasetRoot = path.join(dataDir, 'datasets', version);
+  const zipPath = path.join(dataDir, 'datasets', `${version}.zip`);
+  if (!fs.existsSync(datasetRoot) || !fs.existsSync(zipPath)) {
+    throw new Error('Dataset export or ZIP is missing');
+  }
+  const archiveJobId = `dataset-${version}`;
+  const recordPath = path.join(dataDir, 'datasets', `${version}.archive.json`);
+  const writeStatus = (archive) => {
+    const record = { archiveJobId, datasetVersion: version, archive, updatedAt: new Date().toISOString() };
+    const temporary = `${recordPath}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify(record, null, 2), 'utf8');
+    fs.renameSync(temporary, recordPath);
+  };
+  if (!nasArchive.enabled) return { state: 'disabled', archiveJobId, error: 'NAS archive is not configured' };
+  const scheduled = nasArchive.schedule({
+    jobId: archiveJobId,
+    status: 'done',
+    shot: null,
+    cache: null,
+    artifacts: [
+      { artifact: 'dataset-zip', filePath: zipPath },
+      { artifact: 'dataset-manifest', filePath: path.join(datasetRoot, 'dataset_manifest.json') },
+      { artifact: 'event-training-manifest', filePath: path.join(datasetRoot, 'event_training_manifest.json') },
+      { artifact: 'split-manifest', filePath: path.join(datasetRoot, 'split_manifest.json') },
+      { artifact: 'data-config', filePath: path.join(datasetRoot, 'data.yaml') },
+    ],
+    manifest: { archiveKind: 'swing_tracking_dataset', datasetVersion: version },
+    onStatus: writeStatus,
+  });
+  if (scheduled) writeStatus({ state: 'pending', attempt: 0, retryAt: null, error: null });
+  return { state: scheduled ? 'pending' : 'not_scheduled', archiveJobId, recordPath };
+}
+
 function resumeNasArchiveQueue() {
   if (!nasArchive.enabled) return;
   let entries = [];
@@ -3516,6 +3553,19 @@ app.post('/api/debug/infer/:jobId/annotation', async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ ok: false, jobId, message: error.message });
+  }
+});
+
+app.post('/api/debug/swing-tracking/datasets/:version/archive', (req, res) => {
+  try {
+    const archive = queueSwingTrackingDatasetArchive(req.params.version);
+    return res.status(archive.state === 'pending' ? 202 : 200).json({
+      ok: true,
+      datasetVersion: req.params.version,
+      archive,
+    });
+  } catch (error) {
+    return res.status(400).json({ ok: false, message: error.message });
   }
 });
 
