@@ -3765,8 +3765,10 @@ app.post('/api/debug/swing-tracking/v2-backfill', async (req, res) => {
     const annotations = await swingTrackingAnnotations.list();
     const result = { requested: Math.min(annotations.length, limit), queued: 0, skipped: 0, unavailable: 0 };
     for (const item of annotations.slice(0, limit)) {
-      const annotation = await swingTrackingAnnotations.load(item.jobId);
-      if (!annotation || !SWING_EVENT_KEYS.some((key) => Number.isFinite(annotation.events?.[key]?.timeMs))) {
+      // `list()` already calculates the labelled-event count. Do not await a
+      // file read per job here: yielding inside the loop lets the serial V2
+      // worker start before this request has finished queueing the batch.
+      if (!Number.isFinite(item.events) || item.events < 1) {
         result.skipped += 1;
         continue;
       }
