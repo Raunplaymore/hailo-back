@@ -45,6 +45,7 @@ const nasThumbnailDir = path.join(debugDir, 'nas-thumbnails');
 const swingTrackingArchiveDir = path.join(dataDir, 'annotations', 'swing-tracking-archive');
 const SWING_EVENT_KEYS = ['address', 'takeaway', 'top', 'impact', 'finish'];
 const DTL_V2_STALE_RUNNING_MS = 10 * 60 * 1000;
+const DTL_V2_TAKEAWAY_PROFILE = 'dtl_v2_73_r1';
 const activeDebugFrameRequests = new Map();
 const swingTrackingAnnotations = createSwingTrackingAnnotationStore({ dataDir });
 const nasArchive = createNasArchive({
@@ -1862,7 +1863,7 @@ async function requestDtlClubPointsV2SidecarAnalysis({ jobId, metaPath, bodyPath
   if (!url || !metaPath) return null;
   const response = await inferFetchJson(url, {
     method: 'POST',
-    body: { jobId, metaPath, bodyPath: bodyPath || null },
+    body: { jobId, metaPath, bodyPath: bodyPath || null, takeawayProfile: DTL_V2_TAKEAWAY_PROFILE },
     timeoutMs: 30_000,
   });
   return response.ok && response.json?.ok === true && response.json?.result
@@ -1880,6 +1881,7 @@ function summarizeDtlClubPointsV2(result, metaPath, durationMs) {
   return {
     status: result?.ok === true && result?.status === 'done' ? 'succeeded' : 'failed',
     model: 'dtl_club_points_v2',
+    takeawayProfile: DTL_V2_TAKEAWAY_PROFILE,
     metaPath,
     processingMs: durationMs,
     events: result?.events || null,
