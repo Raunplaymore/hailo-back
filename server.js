@@ -1897,7 +1897,9 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
   const cache = readAnalysisCache(jobId);
   if (!cache || cache.status !== 'done') return { scheduled: false, reason: 'primary analysis unavailable' };
   const current = cache.dtlClubPointsV2;
-  if (['queued', 'running'].includes(current?.status) || (!force && current?.status === 'succeeded')) {
+  // `force` is used only to resume queued work after a backend restart. Never
+  // duplicate a sidecar that has actually started running.
+  if (current?.status === 'running' || (!force && ['queued', 'succeeded'].includes(current?.status))) {
     return { scheduled: false, reason: current?.status || 'already scheduled' };
   }
 
