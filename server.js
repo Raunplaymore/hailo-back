@@ -1948,9 +1948,12 @@ function scheduleDtlClubPointsV2Sidecar(jobId) {
     const updated = readAnalysisCache(jobId);
     const analysis = updated?.analysis && typeof updated.analysis === 'object' ? { ...updated.analysis } : null;
     const takeawayMs = sidecar.takeaway.timeMs;
-    if (analysis && analysis.events?.takeaway == null && Number.isFinite(takeawayMs)
+    const primaryTakeaway = analysis?.events?.takeaway ?? analysis?.events?.takeawayMs;
+    if (analysis && primaryTakeaway == null && Number.isFinite(takeawayMs)
       && ['confirmed', 'reference'].includes(sidecar.takeaway.status)) {
-      analysis.events = { ...analysis.events, takeaway: { timeMs: takeawayMs } };
+      analysis.events = Object.prototype.hasOwnProperty.call(analysis.events || {}, 'takeawayMs')
+        ? { ...analysis.events, takeawayMs }
+        : { ...analysis.events, takeaway: { timeMs: takeawayMs } };
       analysis.metrics = {
         ...analysis.metrics,
         eventTiming: { ...(analysis.metrics?.eventTiming || {}), takeaway: takeawayMs },
