@@ -1825,6 +1825,142 @@ async function requestUploadMetaGeneration({
   return typeof metaPath === 'string' ? metaPath : null;
 }
 
+async function requestDtlClubPointsV2MetaGeneration({
+  jobId,
+  filename,
+  inputPath,
+  durationSec,
+  videoMeta,
+}) {
+  const url = cameraUrl('/api/meta/from-file');
+  if (!url || !jobId || !filename || !inputPath) return null;
+  const response = await inferFetchJson(url, {
+    method: 'POST',
+    body: {
+      jobId: `${jobId}-dtl-v2`,
+      filename,
+      inputPath,
+      model: 'dtl_club_points_v2',
+      force: true,
+      durationSec,
+      durationMs: videoMeta?.durationMs,
+      width: videoMeta?.width,
+      height: videoMeta?.height,
+      fps: videoMeta?.fps,
+    },
+    timeoutMs: 180_000,
+  });
+  return response.ok && typeof response.json?.metaPath === 'string'
+    ? { metaPath: response.json.metaPath, durationMs: response.durationMs || 0 }
+    : null;
+}
+
+async function requestDtlClubPointsV2SidecarAnalysis({ jobId, metaPath, bodyPath }) {
+  const url = inferUrl('/v1/club-sidecar/from-meta');
+  if (!url || !metaPath) return null;
+  const response = await inferFetchJson(url, {
+    method: 'POST',
+    body: { jobId, metaPath, bodyPath: bodyPath || null },
+    timeoutMs: 30_000,
+  });
+  return response.ok && response.json?.ok === true && response.json?.result
+    ? response.json.result
+    : null;
+}
+
+let dtlClubPointsV2Tail = Promise.resolve();
+
+function summarizeDtlClubPointsV2(result, metaPath, durationMs) {
+  const tracking = result?.metrics?.trackingQuality || null;
+  const eventValidation = result?.eventValidation || null;
+  const takeawayMs = result?.events?.takeawayMs;
+  const takeawayStatus = eventValidation?.eventQuality?.takeaway?.status || 'withheld';
+  return {
+    status: result?.ok === true && result?.status === 'done' ? 'succeeded' : 'failed',
+    model: 'dtl_club_points_v2',
+    metaPath,
+    processingMs: durationMs,
+    events: result?.events || null,
+    trackingQuality: tracking,
+    eventValidation,
+    takeaway: {
+      timeMs: Number.isFinite(takeawayMs) ? takeawayMs : null,
+      status: takeawayStatus,
+      appliedToPrimary: false,
+    },
+    completedAt: new Date().toISOString(),
+  };
+}
+
+function scheduleDtlClubPointsV2Sidecar(jobId) {
+  const cache = readAnalysisCache(jobId);
+  if (!cache || cache.status !== 'done') return;
+  const current = cache.dtlClubPointsV2;
+  if (['queued', 'running', 'succeeded'].includes(current?.status)) return;
+
+  mergeAnalysisCache(jobId, {
+    dtlClubPointsV2: { status: 'queued', model: 'dtl_club_points_v2', queuedAt: new Date().toISOString() },
+  });
+  const run = dtlClubPointsV2Tail.then(async () => {
+    const latest = readAnalysisCache(jobId);
+    const shot = shotStore.getShotByJobId(jobId);
+    const inputPath = shot?.metadata?.analysisInput?.path || shot?.media?.path;
+    const bodyPath = latest?.progress?.bodyPath || shot?.metadata?.bodyPath || bodyArtifactPath(jobId);
+    if (!inputPath || !fs.existsSync(inputPath)) {
+      mergeAnalysisCache(jobId, { dtlClubPointsV2: { status: 'failed', error: 'analysis input unavailable' } });
+      return;
+    }
+    mergeAnalysisCache(jobId, {
+      dtlClubPointsV2: { status: 'running', model: 'dtl_club_points_v2', startedAt: new Date().toISOString() },
+    });
+    const videoMeta = await getVideoMeta(inputPath);
+    const generated = await requestDtlClubPointsV2MetaGeneration({
+      jobId,
+      filename: shot?.media?.filename || path.basename(inputPath),
+      inputPath,
+      durationSec: Number.isFinite(videoMeta?.durationMs) ? videoMeta.durationMs / 1000 : undefined,
+      videoMeta,
+    });
+    if (!generated) {
+      mergeAnalysisCache(jobId, { dtlClubPointsV2: { status: 'failed', error: 'DTL V2 meta generation failed' } });
+      return;
+    }
+    const result = await requestDtlClubPointsV2SidecarAnalysis({ jobId, metaPath: generated.metaPath, bodyPath });
+    if (!result) {
+      mergeAnalysisCache(jobId, {
+        dtlClubPointsV2: { status: 'failed', metaPath: generated.metaPath, error: 'DTL V2 sidecar analysis failed' },
+      });
+      return;
+    }
+    const sidecar = summarizeDtlClubPointsV2(result, generated.metaPath, generated.durationMs);
+    const updated = readAnalysisCache(jobId);
+    const analysis = updated?.analysis && typeof updated.analysis === 'object' ? { ...updated.analysis } : null;
+    const takeawayMs = sidecar.takeaway.timeMs;
+    if (analysis && analysis.events?.takeaway == null && Number.isFinite(takeawayMs)
+      && ['confirmed', 'reference'].includes(sidecar.takeaway.status)) {
+      analysis.events = { ...analysis.events, takeaway: { timeMs: takeawayMs } };
+      analysis.metrics = {
+        ...analysis.metrics,
+        eventTiming: { ...(analysis.metrics?.eventTiming || {}), takeaway: takeawayMs },
+      };
+      sidecar.takeaway.appliedToPrimary = true;
+    }
+    if (analysis) {
+      analysis.debug = { ...(analysis.debug || {}), dtlClubPointsV2: sidecar };
+    }
+    const persisted = writeAnalysisCache(jobId, {
+      ...updated,
+      analysis,
+      dtlClubPointsV2: sidecar,
+    }, { scheduleArchive: false });
+    if (persisted) queueNasArchive(persisted, { force: true });
+  });
+  dtlClubPointsV2Tail = run.catch((error) => {
+    console.warn(`[dtl-v2-sidecar] ${jobId} failed: ${error.message}`);
+    mergeAnalysisCache(jobId, { dtlClubPointsV2: { status: 'failed', error: error.message } });
+  });
+}
+
 async function requestBodyAnalysis({
   jobId,
   filename,
@@ -2930,6 +3066,7 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
           errorMessage: analysis?.errorMessage ?? null,
           progress,
         });
+        if (nextStatus === 'done') scheduleDtlClubPointsV2Sidecar(jobId);
         return { status: nextStatus, analysis, progress };
       } else if (!analysis) {
         const errorAnalysis = buildInferErrorAnalysis(jobId, 'infer result unavailable');
