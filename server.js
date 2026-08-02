@@ -43,6 +43,7 @@ const debugDir = path.join(dataDir, 'debug');
 const inferDebugFrameDir = path.join(debugDir, 'infer-frames');
 const nasThumbnailDir = path.join(debugDir, 'nas-thumbnails');
 const swingTrackingArchiveDir = path.join(dataDir, 'annotations', 'swing-tracking-archive');
+const SWING_EVENT_KEYS = ['address', 'takeaway', 'top', 'impact', 'finish'];
 const activeDebugFrameRequests = new Map();
 const swingTrackingAnnotations = createSwingTrackingAnnotationStore({ dataDir });
 const nasArchive = createNasArchive({
@@ -1892,11 +1893,13 @@ function summarizeDtlClubPointsV2(result, metaPath, durationMs) {
   };
 }
 
-function scheduleDtlClubPointsV2Sidecar(jobId) {
+function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
   const cache = readAnalysisCache(jobId);
-  if (!cache || cache.status !== 'done') return;
+  if (!cache || cache.status !== 'done') return { scheduled: false, reason: 'primary analysis unavailable' };
   const current = cache.dtlClubPointsV2;
-  if (['queued', 'running', 'succeeded'].includes(current?.status)) return;
+  if (['queued', 'running'].includes(current?.status) || (!force && current?.status === 'succeeded')) {
+    return { scheduled: false, reason: current?.status || 'already scheduled' };
+  }
 
   mergeAnalysisCache(jobId, {
     dtlClubPointsV2: { status: 'queued', model: 'dtl_club_points_v2', queuedAt: new Date().toISOString() },
@@ -1974,6 +1977,79 @@ function scheduleDtlClubPointsV2Sidecar(jobId) {
     console.warn(`[dtl-v2-sidecar] ${jobId} failed: ${error.message}`);
     mergeAnalysisCache(jobId, { dtlClubPointsV2: { status: 'failed', error: error.message } });
   });
+  return { scheduled: true, reason: 'queued' };
+}
+
+function eventTimeMs(events, key) {
+  if (!events || typeof events !== 'object') return null;
+  const direct = events[`${key}Ms`];
+  if (Number.isFinite(direct)) return direct;
+  const nested = events[key];
+  return nested && typeof nested === 'object' && Number.isFinite(nested.timeMs) ? nested.timeMs : null;
+}
+
+function emptyEventScore() {
+  return { samples: 0, totalAbsoluteErrorMs: 0, within100Ms: 0 };
+}
+
+function finalizeEventScore(score) {
+  return {
+    samples: score.samples,
+    maeMs: score.samples ? Math.round(score.totalAbsoluteErrorMs / score.samples) : null,
+    within100MsRate: score.samples ? Number((score.within100Ms / score.samples).toFixed(3)) : null,
+  };
+}
+
+async function buildDtlClubPointsV2EventBenchmark() {
+  const annotations = await swingTrackingAnnotations.list();
+  const scores = Object.fromEntries(SWING_EVENT_KEYS.map((key) => [key, {
+    primary: emptyEventScore(),
+    v2: emptyEventScore(),
+  }]));
+  let primaryJobs = 0;
+  let v2Jobs = 0;
+
+  for (const item of annotations) {
+    const annotation = await swingTrackingAnnotations.load(item.jobId);
+    const cache = readAnalysisCache(item.jobId);
+    if (!annotation || !cache) continue;
+    const primaryEvents = cache.analysis?.events;
+    const v2 = cache.dtlClubPointsV2 || cache.analysis?.debug?.dtlClubPointsV2;
+    const v2Events = v2?.status === 'succeeded' ? v2.events : null;
+    let primarySeen = false;
+    let v2Seen = false;
+    for (const key of SWING_EVENT_KEYS) {
+      const labeled = annotation.events?.[key]?.timeMs;
+      if (!Number.isFinite(labeled)) continue;
+      for (const [name, events] of [['primary', primaryEvents], ['v2', v2Events]]) {
+        const predicted = eventTimeMs(events, key);
+        if (!Number.isFinite(predicted)) continue;
+        const score = scores[key][name];
+        const errorMs = Math.abs(predicted - labeled);
+        score.samples += 1;
+        score.totalAbsoluteErrorMs += errorMs;
+        if (errorMs <= 100) score.within100Ms += 1;
+        if (name === 'primary') primarySeen = true;
+        else v2Seen = true;
+      }
+    }
+    if (primarySeen) primaryJobs += 1;
+    if (v2Seen) v2Jobs += 1;
+  }
+
+  const events = Object.fromEntries(SWING_EVENT_KEYS.map((key) => {
+    const primary = finalizeEventScore(scores[key].primary);
+    const v2 = finalizeEventScore(scores[key].v2);
+    return [key, {
+      primary,
+      v2,
+      v2ImprovesMae: primary.maeMs != null && v2.maeMs != null ? v2.maeMs < primary.maeMs : null,
+      v2ImprovesWithin100Ms: primary.within100MsRate != null && v2.within100MsRate != null
+        ? v2.within100MsRate > primary.within100MsRate
+        : null,
+    }];
+  }));
+  return { annotationJobs: annotations.length, primaryJobs, v2Jobs, events };
 }
 
 async function requestBodyAnalysis({
@@ -3674,6 +3750,40 @@ app.get('/api/debug/swing-tracking/annotations', async (_req, res) => {
       target: 30,
       annotations,
     });
+  } catch (error) {
+    return res.status(500).json({ ok: false, message: error.message });
+  }
+});
+
+// Shadow mode only: create V2 candidates from manually labelled DTL jobs. It
+// never submits the primary analysis pipeline or changes primary events.
+app.post('/api/debug/swing-tracking/v2-backfill', async (req, res) => {
+  const requestedLimit = Number(req.body?.limit);
+  const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(Math.round(requestedLimit), 100)) : 100;
+  const force = req.body?.force === true;
+  try {
+    const annotations = await swingTrackingAnnotations.list();
+    const result = { requested: Math.min(annotations.length, limit), queued: 0, skipped: 0, unavailable: 0 };
+    for (const item of annotations.slice(0, limit)) {
+      const annotation = await swingTrackingAnnotations.load(item.jobId);
+      if (!annotation || !SWING_EVENT_KEYS.some((key) => Number.isFinite(annotation.events?.[key]?.timeMs))) {
+        result.skipped += 1;
+        continue;
+      }
+      const scheduled = scheduleDtlClubPointsV2Sidecar(item.jobId, { force });
+      if (scheduled.scheduled) result.queued += 1;
+      else if (scheduled.reason === 'primary analysis unavailable') result.unavailable += 1;
+      else result.skipped += 1;
+    }
+    return res.status(202).json({ ok: true, mode: 'shadow', ...result });
+  } catch (error) {
+    return res.status(500).json({ ok: false, message: error.message });
+  }
+});
+
+app.get('/api/debug/swing-tracking/v2-event-benchmark', async (_req, res) => {
+  try {
+    return res.json({ ok: true, mode: 'shadow', benchmark: await buildDtlClubPointsV2EventBenchmark() });
   } catch (error) {
     return res.status(500).json({ ok: false, message: error.message });
   }
