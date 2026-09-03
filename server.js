@@ -38,7 +38,7 @@ const persistentMetaDir = process.env.PERSISTENT_META_DIR || path.join(dataDir, 
 const nasDeletionCursorPath = path.join(dataDir, 'nas-deletion-cursor.json');
 // Keep this contract aligned with hailo-infer's emitted result version. A stale
 // expectation silently bypasses completed-cache reuse and can submit duplicate work.
-const expectedInferAnalysisVersion = process.env.INFER_ANALYSIS_VERSION || 'hailo-coach-service7-v14';
+const expectedInferAnalysisVersion = process.env.INFER_ANALYSIS_VERSION || 'hailo-coach-service7-v16';
 const debugDir = path.join(dataDir, 'debug');
 const inferDebugFrameDir = path.join(debugDir, 'infer-frames');
 const nasThumbnailDir = path.join(debugDir, 'nas-thumbnails');
@@ -2161,6 +2161,8 @@ function buildQueuedUploadShot(file, body) {
       );
   const metadata = {
     club: body.club,
+    viewpoint: ['down_the_line', 'face_on'].includes(body.viewpoint) ? body.viewpoint : 'unknown',
+    handedness: ['right', 'left'].includes(body.handedness) ? body.handedness : 'unknown',
     fps: toNumberOrUndefined(body.fps),
     cameraConfig: body.cameraConfig,
     roi: body.roi,
@@ -2351,7 +2353,12 @@ async function analyzeAndStoreUploadedShot(file, body) {
           metaPath: effectiveMetaPath,
           bodyPath: effectiveBodyPath,
         },
-        options: { force: Boolean(force) },
+        options: {
+          force: Boolean(force),
+          ...(body.club ? { club: body.club } : {}),
+          ...(['down_the_line', 'face_on'].includes(body.viewpoint) ? { viewpoint: body.viewpoint } : {}),
+          ...(['right', 'left'].includes(body.handedness) ? { handedness: body.handedness } : {}),
+        },
       };
       const submitResult = await submitInferJobAndWait(jobId, requestBody);
       if (submitResult.accepted) {
@@ -2812,6 +2819,12 @@ app.post('/api/analyze/from-file', async (req, res) => {
     typeof payload.options?.club === 'string' && payload.options.club.trim()
       ? payload.options.club.trim()
       : null;
+  const viewpoint = ['down_the_line', 'face_on'].includes(payload.options?.viewpoint)
+    ? payload.options.viewpoint
+    : 'unknown';
+  const handedness = ['right', 'left'].includes(payload.options?.handedness)
+    ? payload.options.handedness
+    : 'unknown';
   if (!providedJobId) {
     return res.status(400).json({ ok: false, message: 'jobId is required' });
   }
@@ -2957,6 +2970,8 @@ app.post('/api/analyze/from-file', async (req, res) => {
     options: {
       force: Boolean(force),
       ...(club ? { club } : {}),
+      ...(viewpoint !== 'unknown' ? { viewpoint } : {}),
+      ...(handedness !== 'unknown' ? { handedness } : {}),
     },
   };
 
