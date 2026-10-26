@@ -17,6 +17,7 @@ const {
   validateAnnotationIdentity,
 } = require('./store/swingTrackingAnnotations');
 const { createNasArchive } = require('./storage/nasArchive');
+const { createImpactReviewCache } = require('./store/impactReviewCache');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -55,6 +56,27 @@ const nasArchive = createNasArchive({
   onStatus: (archiveStatus) => updateNasArchiveStatus(archiveStatus.jobId, archiveStatus),
   onDeleted: (jobId) => setImmediate(() => applyNasDeletion(jobId)),
 });
+
+const impactReviews = createImpactReviewCache({
+  dataDir,
+  run: async (jobId, inputPath, bodyPath) => {
+    const response = await inferFetchJson(inferUrl('/v1/impact-review'), {
+      method: 'POST', body: { jobId, inputPath, bodyPath, automatic: true, confirmedInput: false }, timeoutMs: 180000,
+    });
+    if (!response.ok) throw new Error(typeof response.json?.detail === 'string' ? response.json.detail : '임팩트 후보 계산에 실패했습니다.');
+    return response.json;
+  },
+});
+function scheduleAutomaticImpact(jobId, inputPath, bodyPath = null) {
+  // This queue never changes the legacy coach result, timing metrics or training labels.
+  try { return impactReviews.schedule(jobId, inputPath, bodyPath); }
+  catch (error) { return Promise.reject(error); }
+}
+function queueAutomaticImpact(jobId, inputPath, bodyPath = null, geometry = null) {
+  const metadata = geometry || shotStore.getShotByJobId(jobId)?.metadata;
+  if (metadata?.viewpoint === 'face_on' || metadata?.handedness === 'left') return;
+  scheduleAutomaticImpact(jobId, inputPath, bodyPath).catch((error) => console.warn(`[impact-candidate] ${jobId}: ${error.message}`));
+}
 
 // Ensure upload directory exists
 fs.mkdirSync(uploadDir, { recursive: true });
@@ -2259,6 +2281,8 @@ async function analyzeAndStoreUploadedShot(file, body) {
       );
   const meta = {
     club: body.club,
+    viewpoint: body.viewpoint || existing?.metadata?.viewpoint || 'unknown',
+    handedness: body.handedness || existing?.metadata?.handedness || 'unknown',
     fps: toNumberOrUndefined(body.fps),
     cameraConfig: body.cameraConfig,
     roi: body.roi,
@@ -2460,16 +2484,11 @@ async function analyzeAndStoreUploadedShot(file, body) {
   }
 
   updateProgress('video_ready');
-  createPendingShot({
-    metadata: {
-      analysisInput: {
-        path: prepared.path,
-        converted: Boolean(prepared.converted),
-        conversion: prepared.conversion,
-        warning: prepared.warning,
-      },
-    },
-  });
+  meta.analysisInput = {
+    path: prepared.path, converted: Boolean(prepared.converted),
+    conversion: prepared.conversion, warning: prepared.warning,
+  };
+  createPendingShot();
 
   const preparedVideoMeta = await getVideoMeta(prepared.path);
 
@@ -2514,6 +2533,8 @@ async function analyzeAndStoreUploadedShot(file, body) {
     });
     createPendingShot();
   }
+
+  queueAutomaticImpact(jobId, prepared.path, bodyResult.ok ? effectiveBodyPath : null);
 
   if (!explicitMetaPath) {
     progress = buildGroupedProgress('club_running', {
@@ -2958,6 +2979,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
   }
 
   const videoPath = resolvedVideoPath;
+  if (fs.existsSync(videoPath)) queueAutomaticImpact(providedJobId, videoPath, null, { viewpoint, handedness });
   const requestBody = {
     mode: 'coach_from_meta',
     jobId: providedJobId,
@@ -3306,32 +3328,47 @@ async function respondJobResult(req, res) {
 app.get('/api/analyze/:jobId/review-video', (req, res) => {
   const { jobId } = req.params;
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) return res.sendStatus(400);
+  const cached = impactReviews.read(jobId);
+  if (req.query.v && cached?.result?.videoSha256 !== req.query.v) return res.sendStatus(409);
   const shot = shotStore.getShotByJobId(jobId);
-  const inputPath = shot?.metadata?.analysisInput?.path || shot?.media?.path;
+  const inputPath = req.query.v ? cached?.inputPath : shot?.metadata?.analysisInput?.path || shot?.media?.path;
   if (!inputPath || !fs.existsSync(inputPath)) return res.sendStatus(404);
   return res.sendFile(path.resolve(inputPath));
 });
 
 app.post('/api/analyze/:jobId/impact-review', async (req, res) => {
   const { jobId } = req.params;
-  if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId) || req.body?.confirmedInput !== true) {
-    return res.status(400).json({ ok: false, error: '오른손 DTL 단일 스윙 입력 확인이 필요합니다.' });
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId) || (req.body?.automatic !== true && req.body?.confirmedInput !== true)) {
+    return res.status(400).json({ ok: false, error: '임팩트 후보 요청 방식이 필요합니다.' });
   }
-  const shot = shotStore.getShotByJobId(jobId);
+  let shot = shotStore.getShotByJobId(jobId);
   if (!shot) return res.status(404).json({ ok: false, error: '저장된 영상을 찾을 수 없습니다.' });
-  const inputPath = shot.metadata?.analysisInput?.path || shot.media?.path;
-  if (!inputPath || !fs.existsSync(inputPath)) {
-    return res.status(404).json({ ok: false, error: '원본 영상이 Pi에 없습니다.' });
+  // A new upload may still be converting; use its prepared input rather than racing the conversion.
+  const deadline = Date.now() + 120000;
+  while (['queued', 'running'].includes(shot.status)
+    && ['upload_received', 'video_preparing', 'pose_running'].includes(shot.progress?.stage)
+    && Date.now() < deadline) {
+    await sleep(500);
+    shot = shotStore.getShotByJobId(jobId);
+    if (!shot) return res.status(404).json({ ok: false, error: '저장된 영상을 찾을 수 없습니다.' });
   }
-  const result = await inferFetchJson(inferUrl('/v1/impact-review'), {
-    method: 'POST', body: { jobId, inputPath, confirmedInput: true }, timeoutMs: 180000,
-  });
-  if (!result.ok) {
-    return res.status(result.status === 409 ? 409 : 502).json({
-      ok: false, error: typeof result.json?.detail === 'string' ? result.json.detail : '임팩트 검수를 요청하지 못했습니다. 잠시 후 다시 시도해 주세요.',
-    });
+  if (shot.metadata?.viewpoint === 'face_on' || shot.metadata?.handedness === 'left') {
+    return res.status(422).json({ ok: false, error: '현재 임팩트 후보는 오른손 DTL 영상만 지원합니다.' });
   }
-  return res.json(result.json);
+  let inputPath = shot.metadata?.analysisInput?.path || shot.media?.path;
+  if (!inputPath || !fs.existsSync(inputPath)) return res.status(404).json({ ok: false, error: '원본 영상이 Pi에 없습니다.' });
+  try {
+    if (!shot.metadata?.analysisInput?.path) {
+      const prepared = await prepareVideoForAnalysis(inputPath, shot.media?.filename || path.basename(inputPath));
+      if (!prepared.ok) throw new Error('영상을 준비하지 못했습니다.');
+      inputPath = prepared.path;
+    }
+    const bodyPath = shot.metadata?.bodyPath || bodyArtifactPath(jobId);
+    const result = await scheduleAutomaticImpact(jobId, inputPath, fs.existsSync(bodyPath) ? bodyPath : null);
+    return res.json(result);
+  } catch (error) {
+    return res.status(502).json({ ok: false, error: error.message || '임팩트 후보를 계산하지 못했습니다.' });
+  }
 });
 
 app.get('/api/analyze/:jobId', respondJobStatus);
