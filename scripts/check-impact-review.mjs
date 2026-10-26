@@ -49,4 +49,20 @@ try {
   assert.equal((await retry.schedule('good',video)).jobId,'good','failed job must not poison later queued jobs');
   assert.equal((await readFile(video,'utf8')),'changed source video');
 } finally { await rm(root,{recursive:true,force:true}); }
-console.log('automatic impact route, cache, deduplication and failure-recovery checks passed');
+let registration;
+let queued;
+const existing={id:'old',sourceType:'upload',metadata:{keep:'value'},analysis:{tempo:3}};
+const registrationSource=source.slice(source.indexOf('function registerFileImpact('),source.indexOf('// Ensure upload directory exists'));
+const registrationContext={
+  fs:{existsSync:()=>true,statSync:()=>({isFile:()=>true,size:5})},
+  shotStore:{getShotByMediaName:()=>existing,upsertShot:(value)=>{registration=value;}},
+  randomUUID:()=> 'new-id',queueAutomaticImpact:(...args)=>{queued=args;},
+};
+vm.createContext(registrationContext);
+vm.runInContext(registrationSource+';registerFileImpact("camera-job","capture.mp4","/uploads/capture.mp4",{viewpoint:"down_the_line",handedness:"right"});',registrationContext);
+assert.equal(registration.jobId,'camera-job');
+assert.equal(registration.metadata.keep,'value');
+assert.equal(registration.analysis,existing.analysis);
+assert.equal(existing.metadata.analysisInput,undefined,'association must not mutate prior metadata');
+assert.equal(queued[1],'/uploads/capture.mp4');
+console.log('automatic impact route, cache, deduplication, camera association and failure-recovery checks passed');

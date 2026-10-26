@@ -78,6 +78,24 @@ function queueAutomaticImpact(jobId, inputPath, bodyPath = null, geometry = null
   scheduleAutomaticImpact(jobId, inputPath, bodyPath).catch((error) => console.warn(`[impact-candidate] ${jobId}: ${error.message}`));
 }
 
+function registerFileImpact(jobId, filename, inputPath, geometry) {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId) || !fs.existsSync(inputPath) || !fs.statSync(inputPath).isFile()) return;
+  const previous = shotStore.getShotByMediaName(filename);
+  const metadata = { ...previous?.metadata };
+  for (const key of ['viewpoint', 'handedness']) {
+    if (geometry[key] !== 'unknown') metadata[key] = geometry[key];
+  }
+  metadata.analysisInput ||= { path: inputPath, converted: false };
+  shotStore.upsertShot({
+    ...previous, id: previous?.id || randomUUID(), jobId,
+    sourceType: previous?.sourceType || 'camera', status: previous?.status || 'not-analyzed',
+    createdAt: previous?.createdAt || new Date().toISOString(),
+    media: previous?.media || { filename, path: inputPath, size: fs.statSync(inputPath).size },
+    metadata,
+  });
+  queueAutomaticImpact(jobId, metadata.analysisInput.path, null, metadata);
+}
+
 // Ensure upload directory exists
 fs.mkdirSync(uploadDir, { recursive: true });
 fs.mkdirSync(dataDir, { recursive: true });
@@ -2907,6 +2925,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
     }
   }
 
+  registerFileImpact(providedJobId, targetFilename, resolvedVideoPath, { viewpoint, handedness });
   const cached = readAnalysisCache(providedJobId);
   const cachedAgeMs = cached?.updatedAt ? Date.now() - Date.parse(cached.updatedAt) : Number.POSITIVE_INFINITY;
   const hasFreshInFlightCache =
@@ -2979,7 +2998,6 @@ app.post('/api/analyze/from-file', async (req, res) => {
   }
 
   const videoPath = resolvedVideoPath;
-  if (fs.existsSync(videoPath)) queueAutomaticImpact(providedJobId, videoPath, null, { viewpoint, handedness });
   const requestBody = {
     mode: 'coach_from_meta',
     jobId: providedJobId,
