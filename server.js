@@ -2363,6 +2363,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
   createPendingShot();
 
   if (explicitMetaPath) {
+    queueAutomaticImpact(jobId, file.path);
     progress = buildGroupedProgress('club_ready', {
       analysisPath: 'infer',
       metaPath: effectiveMetaPath,
