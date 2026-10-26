@@ -3352,7 +3352,8 @@ app.get('/api/analyze/:jobId/review-video', (req, res) => {
   const shot = shotStore.getShotByJobId(jobId);
   const inputPath = req.query.v ? cached?.inputPath : shot?.metadata?.analysisInput?.path || shot?.media?.path;
   if (!inputPath || !fs.existsSync(inputPath)) return res.sendStatus(404);
-  return res.sendFile(path.resolve(inputPath));
+  // A known storage root keeps .converted out of Express's hidden request-path check.
+  return res.sendFile(path.basename(inputPath), { root: path.dirname(path.resolve(inputPath)) });
 });
 
 app.post('/api/analyze/:jobId/impact-review', async (req, res) => {
