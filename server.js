@@ -2890,7 +2890,7 @@ app.post('/api/analyze/from-file', async (req, res) => {
   });
 
   if (requireVideo) {
-    const videoStat = await fsp.stat(resolvedVideoPath).catch(() => null);
+    const videoStat = await fs.promises.stat(resolvedVideoPath).catch(() => null);
     if (!videoStat?.isFile() || videoStat.size <= 0) {
       const errorCode = videoStat ? 'VIDEO_EMPTY' : 'VIDEO_MISSING';
       const errorMessage = videoStat
