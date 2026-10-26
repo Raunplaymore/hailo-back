@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import vm from 'node:vm';
 import cacheModule from '../store/impactReviewCache.js';
 const source = await readFile(new URL('../server.js', import.meta.url), 'utf8');
-const route = source.slice(source.indexOf("app.post('/api/analyze/:jobId/impact-review'"), source.indexOf("app.get('/api/analyze/:jobId',"));
+const route = source.slice(source.indexOf("app.post('/api/analyze/:jobId/impact-review'"), source.indexOf("app.post('/api/analyze/:jobId/practice-review'"));
 let handler;
 const calls = [];
 const shot = { status: 'done', metadata: { analysisInput: { path: '/uploads/known.mp4' } } };

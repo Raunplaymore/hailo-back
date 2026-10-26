@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { createHash } = require('crypto');
 
 const TERMINAL_STATUSES = new Set(['done', 'failed']);
 const MAX_ATTEMPTS = 3;
@@ -8,6 +9,7 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
   const origin = String(baseUrl || '').replace(/\/$/, '');
   const enabled = Boolean(origin && token);
   const pending = new Set();
+  const pendingUpdates = new Map();
 
   function reportStatus(payload, status) {
     try {
@@ -43,11 +45,15 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
     }
   }
 
-  async function uploadFile(jobId, artifact, filePath) {
+  async function uploadFile(jobId, artifact, filePath, previous) {
     const stat = await fs.promises.stat(filePath);
     if (!stat.isFile()) return null;
     const extension = path.extname(filePath).toLowerCase() || '.bin';
     const archiveFilename = `${artifact}${extension}`;
+    const hash = createHash('sha256');
+    for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk);
+    const sha256 = hash.digest('hex');
+    if (previous?.sha256 === sha256 && previous.filename === archiveFilename) return previous;
     await request(`/v1/jobs/${encodeURIComponent(jobId)}/artifacts/${artifact}`, {
       method: 'PUT',
       headers: {
@@ -58,7 +64,7 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
       body: fs.createReadStream(filePath),
       duplex: 'half',
     });
-    return { artifact, filename: archiveFilename, originalFilename: path.basename(filePath), size: stat.size };
+    return { artifact, filename: archiveFilename, originalFilename: path.basename(filePath), size: stat.size, sha256 };
   }
 
   async function uploadJson(jobId, target, payload) {
@@ -74,11 +80,15 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
     const artifacts = typeof payload.prepareArtifacts === 'function'
       ? await payload.prepareArtifacts(payload.artifacts || [])
       : payload.artifacts || [];
-    const uploaded = [];
+    const uploaded = [...(cache?.nasArchive?.artifacts || [])];
     for (const { artifact, filePath } of artifacts) {
       if (!filePath || !fs.existsSync(filePath)) continue;
-      const result = await uploadFile(jobId, artifact, filePath);
-      if (result) uploaded.push(result);
+      const index = uploaded.findIndex((item) => item.artifact === artifact);
+      const result = await uploadFile(jobId, artifact, filePath, uploaded[index]);
+      if (result) {
+        if (index >= 0) uploaded[index] = result;
+        else uploaded.push(result);
+      }
     }
     const archivedShot = shot ? JSON.parse(JSON.stringify(shot)) : null;
     if (archivedShot?.media) delete archivedShot.media.path;
@@ -99,10 +109,14 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
   function schedule(payload, attempt = 0) {
     if (!enabled || !payload?.jobId || !TERMINAL_STATUSES.has(payload.status)) return false;
     const key = `${payload.jobId}:${payload.status}`;
-    if (pending.has(key)) return false;
+    if (pending.has(key)) {
+      pendingUpdates.set(key, payload);
+      return false;
+    }
     pending.add(key);
     setImmediate(async () => {
       const attemptNumber = attempt + 1;
+      let completed = null;
       try {
         reportStatus(payload, {
           state: 'uploading',
@@ -112,6 +126,7 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
           updatedAt: new Date().toISOString(),
         });
         const result = await archive(payload);
+        completed = result;
         reportStatus(payload, {
           state: 'stored',
           attempt: attemptNumber,
@@ -119,6 +134,7 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
           error: null,
           archivedAt: result.archivedAt,
           artifactCount: result.artifacts.length,
+          artifacts: result.artifacts,
           videoStored: result.videoStored,
           updatedAt: new Date().toISOString(),
         });
@@ -139,7 +155,9 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
             error: errorMessage,
             updatedAt: new Date().toISOString(),
           });
-          setTimeout(() => schedule(payload, attempt + 1), delayMs);
+          const retryPayload = pendingUpdates.get(key) || payload;
+          pendingUpdates.delete(key);
+          setTimeout(() => schedule(retryPayload, attempt + 1), delayMs);
         } else {
           reportStatus(payload, {
             state: 'failed',
@@ -152,6 +170,12 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
         }
       } finally {
         pending.delete(key);
+        const latest = pendingUpdates.get(key);
+        pendingUpdates.delete(key);
+        if (completed && latest) {
+          latest.cache = { ...latest.cache, nasArchive: { ...latest.cache?.nasArchive, artifacts: completed.artifacts } };
+          schedule(latest);
+        }
       }
     });
     return true;

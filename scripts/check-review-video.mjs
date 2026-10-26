@@ -12,12 +12,14 @@ fs.mkdirSync(converted);
 const file = path.join(converted, 'converted.mp4');
 const bytes = Buffer.from('known converted video bytes');
 fs.writeFileSync(file, bytes);
+const copy = path.join(root, 'playback.mp4'), small = Buffer.from('small playback bytes');
+fs.writeFileSync(copy, small);
 const source = fs.readFileSync(new URL('../server.js', import.meta.url), 'utf8');
 const route = source.slice(source.indexOf("app.get('/api/analyze/:jobId/review-video'"), source.indexOf("app.post('/api/analyze/:jobId/impact-review'"));
 const app = express();
 const hash = 'a'.repeat(64);
 vm.runInNewContext(route, {
-  app, fs, path,
+  app, fs, path, reviewVideoPath: async () => copy,
   impactReviews: { read: (id) => id === 'known' ? { inputPath: file, result: { videoSha256: hash } } : null },
   shotStore: { getShotByJobId: (id) => id === 'known' ? { metadata: { analysisInput: { path: file } } } : null },
 });
@@ -29,12 +31,14 @@ try {
     const response = await fetch(`${base}/known/review-video${query}`, { headers: { Range: 'bytes=0-4' } });
     assert.equal(response.status, 206, 'known file in .converted must support video range requests');
     assert.match(response.headers.get('content-type'), /video\/mp4/);
-    assert.equal(response.headers.get('content-range'), `bytes 0-4/${bytes.length}`);
-    assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes.subarray(0, 5));
+    assert.equal(response.headers.get('content-range'), `bytes 0-4/${small.length}`);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), small.subarray(0, 5));
   }
   const full = await fetch(`${base}/known/review-video?v=${hash}`);
   assert.equal(full.status, 200);
-  assert.deepEqual(Buffer.from(await full.arrayBuffer()), bytes);
+  assert.deepEqual(Buffer.from(await full.arrayBuffer()), small);
+  const original = await fetch(`${base}/known/review-video?quality=original`);
+  assert.deepEqual(Buffer.from(await original.arrayBuffer()), bytes);
   assert.equal((await fetch(`${base}/known/review-video?v=wrong`)).status, 409);
   assert.equal((await fetch(`${base}/missing/review-video`)).status, 404);
   console.log('converted review video full/range/identity checks passed');

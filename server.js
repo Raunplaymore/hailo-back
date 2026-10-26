@@ -17,6 +17,7 @@ const {
   validateAnnotationIdentity,
 } = require('./store/swingTrackingAnnotations');
 const { createNasArchive } = require('./storage/nasArchive');
+const { createReviewVideo } = require('./storage/reviewVideo');
 const { createImpactReviewCache } = require('./store/impactReviewCache');
 
 const app = express();
@@ -28,6 +29,7 @@ const uploadDir =
 const dataDir =
   process.env.DATA_DIR ||
   (fs.existsSync('/home/ray/data') ? '/home/ray/data' : path.join(__dirname, 'data'));
+const reviewVideoPath = createReviewVideo({ cacheDir: path.join(dataDir, 'review-video'), runCommand });
 const metaDir = process.env.META_DIR || '/tmp';
 const healthDir = path.join(__dirname, 'health');
 const inferBaseUrl = process.env.INFER_BASE_URL || 'http://127.0.0.1:3002';
@@ -1912,6 +1914,7 @@ async function requestDtlClubPointsV2SidecarAnalysis({ jobId, metaPath, bodyPath
 }
 
 let dtlClubPointsV2Tail = Promise.resolve();
+const activeDtlClubPointsV2 = new Set();
 
 function summarizeDtlClubPointsV2(result, metaPath, durationMs) {
   const tracking = result?.metrics?.trackingQuality || null;
@@ -1951,6 +1954,7 @@ function isStaleDtlClubPointsV2Run(sidecar, nowMs = Date.now()) {
 }
 
 function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
+  if (activeDtlClubPointsV2.has(jobId)) return { scheduled: false, reason: 'already scheduled' };
   const cache = readAnalysisCache(jobId);
   if (!cache || cache.status !== 'done') return { scheduled: false, reason: 'primary analysis unavailable' };
   const current = cache.dtlClubPointsV2;
@@ -1968,6 +1972,7 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
   updateDtlClubPointsV2Cache(jobId, {
     status: 'queued', model: 'dtl_club_points_v2', queuedAt: new Date().toISOString(),
   });
+  activeDtlClubPointsV2.add(jobId);
   const run = dtlClubPointsV2Tail.then(async () => {
     const latest = readAnalysisCache(jobId);
     const shot = shotStore.getShotByJobId(jobId);
@@ -2040,7 +2045,7 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
   dtlClubPointsV2Tail = run.catch((error) => {
     console.warn(`[dtl-v2-sidecar] ${jobId} failed: ${error.message}`);
     updateDtlClubPointsV2Cache(jobId, { status: 'failed', error: error.message });
-  });
+  }).finally(() => activeDtlClubPointsV2.delete(jobId));
   return { scheduled: true, reason: 'queued' };
 }
 
@@ -3105,6 +3110,12 @@ app.post('/api/analyze/from-file', async (req, res) => {
 
 async function fetchInferJobPayload(jobId, { includeResult } = {}) {
   const cached = readAnalysisCache(jobId);
+  // Completed reads must not reset sidecar/archive state or schedule work again.
+  if (cached?.status === 'done' && hasFreshInferAnalysis(cached) && hasUsableInferMetrics(cached.analysis)) {
+    const analysis = await hydrateOverlayFromBodyArtifact(cached.analysis, cached.progress?.bodyPath || bodyArtifactPath(jobId));
+    return { status: 'done', analysis, progress: cached.progress || null };
+  }
+  const persist = (patch) => writeAnalysisCache(jobId, { ...readAnalysisCache(jobId), ...patch });
   const shot = shotStore.getShotByJobId(jobId);
   const shotProgress = shot?.progress || null;
   const shotMetadata = shot?.metadata || null;
@@ -3139,7 +3150,7 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
       analysisPath: 'infer',
       message: 'infer service not configured',
     });
-    writeAnalysisCache(jobId, {
+    persist({
       status: 'failed',
       analysis,
       errorCode: analysis.errorCode,
@@ -3165,7 +3176,7 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
       analysisPath: 'infer',
       message: 'infer service unavailable',
     });
-    writeAnalysisCache(jobId, {
+    persist({
       status: 'failed',
       analysis,
       errorCode: analysis.errorCode,
@@ -3205,7 +3216,7 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
             message: 'infer 결과를 준비 중입니다.',
             detail: cachedDetail,
           });
-          writeAnalysisCache(jobId, {
+          persist({
             status: 'running',
             analysis: cachedAnalysis,
             errorCode: null,
@@ -3230,7 +3241,7 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
         if (analysis && typeof analysis === 'object') {
           analysis.progress = progress;
         }
-        writeAnalysisCache(jobId, {
+        persist({
           status: nextStatus,
           analysis,
           errorCode: analysis?.errorCode ?? null,
@@ -3246,7 +3257,7 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
           metaPath: cached?.metaPath || null,
           message: 'infer result unavailable',
         });
-        writeAnalysisCache(jobId, {
+        persist({
           status: 'failed',
           analysis: errorAnalysis,
           errorCode: errorAnalysis.errorCode,
@@ -3260,7 +3271,7 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
     if (analysis && typeof analysis === 'object' && !analysis.progress) {
       analysis.progress = progress;
     }
-    writeAnalysisCache(jobId, {
+    persist({
       status: mappedStatus,
       analysis,
       errorCode: analysis?.errorCode ?? null,
@@ -3273,7 +3284,7 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
   if (analysis && typeof analysis === 'object' && !analysis.progress) {
     analysis.progress = progress;
   }
-  writeAnalysisCache(jobId, {
+  persist({
     status: mappedStatus,
     analysis,
     errorCode: analysis?.errorCode ?? null,
@@ -3344,7 +3355,7 @@ async function respondJobResult(req, res) {
   return res.status(404).json({ ok: false, message: 'Job not found' });
 }
 
-app.get('/api/analyze/:jobId/review-video', (req, res) => {
+app.get('/api/analyze/:jobId/review-video', async (req, res) => {
   const { jobId } = req.params;
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) return res.sendStatus(400);
   const cached = impactReviews.read(jobId);
@@ -3352,8 +3363,9 @@ app.get('/api/analyze/:jobId/review-video', (req, res) => {
   const shot = shotStore.getShotByJobId(jobId);
   const inputPath = req.query.v ? cached?.inputPath : shot?.metadata?.analysisInput?.path || shot?.media?.path;
   if (!inputPath || !fs.existsSync(inputPath)) return res.sendStatus(404);
+  const playbackPath = req.query.quality === 'original' ? inputPath : await reviewVideoPath(inputPath);
   // A known storage root keeps .converted out of Express's hidden request-path check.
-  return res.sendFile(path.basename(inputPath), { root: path.dirname(path.resolve(inputPath)) });
+  return res.sendFile(path.basename(playbackPath), { root: path.dirname(path.resolve(playbackPath)) });
 });
 
 app.post('/api/analyze/:jobId/impact-review', async (req, res) => {
@@ -3388,6 +3400,49 @@ app.post('/api/analyze/:jobId/impact-review', async (req, res) => {
     return res.json(result);
   } catch (error) {
     return res.status(502).json({ ok: false, error: error.message || '임팩트 후보를 계산하지 못했습니다.' });
+  }
+});
+
+app.post('/api/analyze/:jobId/practice-review', async (req, res) => {
+  const { jobId } = req.params;
+  const { addressMs, comparisonMs, viewpoint, confirmedFrames, videoSha256, mode } = req.body || {};
+  const preview = mode === 'preview';
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId) || !Number.isFinite(addressMs) || !Number.isFinite(comparisonMs)
+      || addressMs < 0 || comparisonMs > 30000 || comparisonMs - addressMs < 150
+      || viewpoint !== 'down_the_line' || (!preview && confirmedFrames !== true)
+      || (videoSha256 !== undefined && !/^[a-f0-9]{64}$/.test(videoSha256))) {
+    return res.status(400).json({ ok: false, error: '고정된 DTL 영상에서 어드레스와 임팩트 직전 장면을 확인해 주세요.' });
+  }
+  const shot = shotStore.getShotByJobId(jobId);
+  if (!shot) return res.status(404).json({ ok: false, error: '저장된 영상을 찾을 수 없습니다.' });
+  // Completed analysis reads can leave the capture record's status behind.
+  const analysisStatus = readAnalysisCache(jobId)?.status || shot.status;
+  if (['pending', 'queued', 'running'].includes(analysisStatus)) return res.status(409).json({ ok: false, error: '영상 분석이 끝난 뒤 다시 시도해 주세요.' });
+  if (shot.metadata?.viewpoint === 'face_on') return res.status(422).json({ ok: false, error: '이 자세 비교는 DTL 영상만 지원합니다.' });
+  const cached = videoSha256 ? impactReviews.read(jobId) : null;
+  if (videoSha256 && cached?.result?.videoSha256 !== videoSha256) {
+    return res.status(409).json({ ok: false, error: '영상이 변경됐습니다. 새로고침 후 장면을 다시 선택해 주세요.' });
+  }
+  const inputPath = videoSha256 ? cached.inputPath : shot.metadata?.analysisInput?.path || shot.media?.path;
+  const bodyPath = shot.metadata?.bodyPath || bodyArtifactPath(jobId);
+  if (!inputPath || !fs.existsSync(inputPath) || !fs.existsSync(bodyPath)) {
+    return res.status(404).json({ ok: false, error: '영상 또는 자세 분석이 없습니다. 영상을 다시 분석해 주세요.' });
+  }
+  if (cached) {
+    const stat = fs.statSync(inputPath);
+    if (stat.size !== cached.size || stat.mtimeMs !== cached.mtimeMs) {
+      return res.status(409).json({ ok: false, error: '영상이 변경됐습니다. 새로고침 후 장면을 다시 선택해 주세요.' });
+    }
+  }
+  try {
+    const response = await inferFetchJson(inferUrl(preview ? '/v1/practice-preview' : '/v1/practice-review'), {
+      method: 'POST', timeoutMs: 10000,
+      body: { jobId, inputPath, bodyPath, addressMs, comparisonMs, viewpoint, ...(preview ? { impactMs: cached?.result?.candidate?.timeMs } : { confirmedFrames }) },
+    });
+    if (!response.ok) return res.status(!response.status || response.status >= 500 ? 502 : 422).json({ ok: false, error: typeof response.json?.detail === 'string' ? response.json.detail : '자세 비교를 완료하지 못했습니다.' });
+    return res.json(response.json);
+  } catch (error) {
+    return res.status(502).json({ ok: false, error: '자세 분석 서버에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.' });
   }
 });
 
@@ -3528,16 +3583,24 @@ app.get('/api/files', (_req, res) => {
 });
 
 // List uploaded mp4 files with analysis status so the frontend can show an "Analyze" button
-app.get('/api/files/detail', async (_req, res) => {
+app.get('/api/files/detail', async (req, res) => {
   try {
+    const summary = req.query.summary === 'true';
+    const requestedIds = typeof req.query.jobIds === 'string' ? req.query.jobIds.split(',') : null;
+    if (requestedIds && (requestedIds.length > 200 || requestedIds.some((id) => !isSafeJobId(id)))) {
+      return res.status(400).json({ ok: false, message: 'Invalid jobIds' });
+    }
+    const wanted = requestedIds ? new Set(requestedIds) : null;
+    const shotsByFilename = new Map(shotStore.listShots().map((shot) => [shot.media?.filename, shot]));
     const entries = await fs.promises.readdir(uploadDir, { withFileTypes: true });
     const videoFiles = entries
       .filter((ent) => ent.isFile() && isSupportedVideoExt(ent.name))
+      .filter((ent) => !wanted || wanted.has(shotsByFilename.get(ent.name)?.jobId || path.basename(ent.name, path.extname(ent.name))))
       .map((ent) => ent.name);
 
     const filesWithStatus = await Promise.all(
       videoFiles.map(async (filename) => {
-        const shot = shotStore.getShotByMediaName(filename);
+        const shot = shotsByFilename.get(filename);
         const derivedJobId = path.basename(filename, path.extname(filename));
         // Upload filenames contain their own unique prefix and do not have to
         // equal the UUID analysis jobId.  Look up the cache with the shot's
@@ -3557,7 +3620,7 @@ app.get('/api/files/detail', async (_req, res) => {
           (shot?.analysis
             ? (looksLikeAnalysisFailure(shot.analysis) ? 'failed' : 'succeeded')
             : 'not-analyzed');
-        const effectiveAnalysis = cached ? cachedAnalysis : shot ? buildJobAnalysisPayload(shot) : null;
+        const effectiveAnalysis = summary ? null : cached ? cachedAnalysis : shot ? buildJobAnalysisPayload(shot) : null;
         let stats;
         try {
           stats = await fs.promises.stat(path.join(uploadDir, filename));
@@ -3584,7 +3647,7 @@ app.get('/api/files/detail', async (_req, res) => {
           status: effectiveStatus,
           errorCode,
           errorMessage,
-          nasArchive: cached?.nasArchive || null,
+          nasArchive: cached?.nasArchive ? { ...cached.nasArchive, artifacts: undefined } : null,
           metaPath: cached?.metaPath || null,
           size: stats?.size,
           modifiedAt: stats?.mtime?.toISOString(),

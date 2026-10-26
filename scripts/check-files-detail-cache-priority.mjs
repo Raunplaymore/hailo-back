@@ -9,7 +9,7 @@ const required = [
   "const cached = readAnalysisCache(cacheJobId)",
   "const effectiveStatus =",
   "cachedFileStatus ||",
-  "const effectiveAnalysis = cached ? cachedAnalysis",
+  "const effectiveAnalysis = summary ? null : cached ? cachedAnalysis",
   "analyzed: effectiveStatus === 'succeeded'",
   "status: effectiveStatus",
   "analysis: effectiveAnalysis",

@@ -22,7 +22,7 @@ assert.match(serverSource, /return archive\?\.state === 'stored'/, 'A stored NAS
 assert.match(serverSource, /async function removeJobArtifacts/, 'Pi video deletion must remove its local analysis artifacts.');
 assert.match(serverSource, /nasArchive\.deleteJob\(jobId\)/, 'Pi video deletion must remove the matching NAS archive.');
 assert.match(serverSource, /app\.post\('\/api\/archive\/:jobId\/retry'/, 'Pi service must expose a NAS archive retry endpoint.');
-assert.match(serverSource, /nasArchive: cached\?\.nasArchive \|\| null/, 'File listing must expose NAS archive status.');
+assert.match(serverSource, /nasArchive: cached\?\.nasArchive \?/, 'File listing must expose NAS archive status.');
 assert.match(storageApiSource, /ARCHIVE_TOKEN is required/, 'NAS API must require an archive token.');
 assert.match(storageApiSource, /validArtifacts/, 'NAS API must restrict artifact names.');
 assert.match(storageApiSource, /GET' && manifestMatch/, 'NAS API must provide an authenticated manifest retrieval route.');
