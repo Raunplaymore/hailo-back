@@ -19,7 +19,7 @@ const {
 const { createNasArchive } = require('./storage/nasArchive');
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
 // Default to local uploads directory; allow override for Raspberry Pi via env
 const uploadDir =
   process.env.UPLOAD_DIR ||
@@ -3302,6 +3302,37 @@ async function respondJobResult(req, res) {
 
   return res.status(404).json({ ok: false, message: 'Job not found' });
 }
+
+app.get('/api/analyze/:jobId/review-video', (req, res) => {
+  const { jobId } = req.params;
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) return res.sendStatus(400);
+  const shot = shotStore.getShotByJobId(jobId);
+  const inputPath = shot?.metadata?.analysisInput?.path || shot?.media?.path;
+  if (!inputPath || !fs.existsSync(inputPath)) return res.sendStatus(404);
+  return res.sendFile(path.resolve(inputPath));
+});
+
+app.post('/api/analyze/:jobId/impact-review', async (req, res) => {
+  const { jobId } = req.params;
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId) || req.body?.confirmedInput !== true) {
+    return res.status(400).json({ ok: false, error: '오른손 DTL 단일 스윙 입력 확인이 필요합니다.' });
+  }
+  const shot = shotStore.getShotByJobId(jobId);
+  if (!shot) return res.status(404).json({ ok: false, error: '저장된 영상을 찾을 수 없습니다.' });
+  const inputPath = shot.metadata?.analysisInput?.path || shot.media?.path;
+  if (!inputPath || !fs.existsSync(inputPath)) {
+    return res.status(404).json({ ok: false, error: '원본 영상이 Pi에 없습니다.' });
+  }
+  const result = await inferFetchJson(inferUrl('/v1/impact-review'), {
+    method: 'POST', body: { jobId, inputPath, confirmedInput: true }, timeoutMs: 180000,
+  });
+  if (!result.ok) {
+    return res.status(result.status === 409 ? 409 : 502).json({
+      ok: false, error: typeof result.json?.detail === 'string' ? result.json.detail : '임팩트 검수를 요청하지 못했습니다. 잠시 후 다시 시도해 주세요.',
+    });
+  }
+  return res.json(result.json);
+});
 
 app.get('/api/analyze/:jobId', respondJobStatus);
 app.get('/api/analyze/:jobId/result', respondJobResult);
