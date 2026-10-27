@@ -3406,11 +3406,13 @@ app.post('/api/analyze/:jobId/impact-review', async (req, res) => {
 app.post('/api/analyze/:jobId/practice-review', async (req, res) => {
   const { jobId } = req.params;
   const { addressMs, comparisonMs, viewpoint, confirmedFrames, videoSha256, mode } = req.body || {};
-  const preview = mode === 'preview';
+  const coaching = mode === 'coaching';
+  const preview = mode === 'preview' || coaching;
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId) || !Number.isFinite(addressMs) || !Number.isFinite(comparisonMs)
       || addressMs < 0 || comparisonMs > 30000 || comparisonMs - addressMs < 150
       || viewpoint !== 'down_the_line' || (!preview && confirmedFrames !== true)
-      || (videoSha256 !== undefined && !/^[a-f0-9]{64}$/.test(videoSha256))) {
+      || (videoSha256 !== undefined && !/^[a-f0-9]{64}$/.test(videoSha256))
+      || (coaching && typeof videoSha256 !== 'string')) {
     return res.status(400).json({ ok: false, error: '고정된 DTL 영상에서 어드레스와 임팩트 직전 장면을 확인해 주세요.' });
   }
   const shot = shotStore.getShotByJobId(jobId);
@@ -3435,11 +3437,11 @@ app.post('/api/analyze/:jobId/practice-review', async (req, res) => {
     }
   }
   try {
-    const response = await inferFetchJson(inferUrl(preview ? '/v1/practice-preview' : '/v1/practice-review'), {
-      method: 'POST', timeoutMs: 10000,
+    const response = await inferFetchJson(inferUrl(coaching ? '/v1/coaching-review' : preview ? '/v1/practice-preview' : '/v1/practice-review'), {
+      method: 'POST', timeoutMs: coaching ? 30000 : 10000,
       body: { jobId, inputPath, bodyPath, addressMs, comparisonMs, viewpoint, ...(preview ? { impactMs: cached?.result?.candidate?.timeMs } : { confirmedFrames }) },
     });
-    if (!response.ok) return res.status(!response.status || response.status >= 500 ? 502 : 422).json({ ok: false, error: typeof response.json?.detail === 'string' ? response.json.detail : '자세 비교를 완료하지 못했습니다.' });
+    if (!response.ok) return res.status(!response.status || response.status >= 500 ? 502 : response.status === 409 ? 409 : 422).json({ ok: false, error: typeof response.json?.detail === 'string' ? response.json.detail : '자세 비교를 완료하지 못했습니다.' });
     return res.json(response.json);
   } catch (error) {
     return res.status(502).json({ ok: false, error: '자세 분석 서버에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.' });
