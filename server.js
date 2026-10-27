@@ -1900,12 +1900,12 @@ async function requestDtlClubPointsV2MetaGeneration({
     : null;
 }
 
-async function requestDtlClubPointsV2SidecarAnalysis({ jobId, metaPath, bodyPath }) {
+async function requestDtlClubPointsV2SidecarAnalysis({ jobId, metaPath, bodyPath, impactMs }) {
   const url = inferUrl('/v1/club-sidecar/from-meta');
   if (!url || !metaPath) return null;
   const response = await inferFetchJson(url, {
     method: 'POST',
-    body: { jobId, metaPath, bodyPath: bodyPath || null, takeawayProfile: DTL_V2_TAKEAWAY_PROFILE },
+    body: { jobId, metaPath, bodyPath: bodyPath || null, takeawayProfile: DTL_V2_TAKEAWAY_PROFILE, impactMs },
     timeoutMs: 30_000,
   });
   return response.ok && response.json?.ok === true && response.json?.result
@@ -1929,6 +1929,9 @@ function summarizeDtlClubPointsV2(result, metaPath, durationMs) {
     processingMs: durationMs,
     events: result?.events || null,
     trackingQuality: tracking,
+    observations: result?.clubObservations || null,
+    overlay: result?.overlay?.clubTimeSource === 'video_pts'
+      ? { ...result.overlay, poseFrames: [] } : null,
     eventValidation,
     takeaway: {
       timeMs: Number.isFinite(takeawayMs) ? takeawayMs : null,
@@ -1959,10 +1962,9 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
   if (!cache || cache.status !== 'done') return { scheduled: false, reason: 'primary analysis unavailable' };
   const current = cache.dtlClubPointsV2;
   const staleRunning = isStaleDtlClubPointsV2Run(current);
-  // `force` resumes queued work after a backend restart or a stale (10+ min)
-  // running state. It never reprocesses a completed sidecar or a live worker.
+  // Explicit refresh upgrades legacy sidecars once; live/current work is reused.
   if (
-    current?.status === 'succeeded'
+    (current?.status === 'succeeded' && (!force || current.observations?.revision === 1))
     || (current?.status === 'queued' && !force)
     || (current?.status === 'running' && !(force && staleRunning))
   ) {
@@ -1976,6 +1978,10 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
   const run = dtlClubPointsV2Tail.then(async () => {
     const latest = readAnalysisCache(jobId);
     const shot = shotStore.getShotByJobId(jobId);
+    if (shot?.metadata?.viewpoint === 'face_on' || shot?.metadata?.handedness === 'left') {
+      updateDtlClubPointsV2Cache(jobId, { status: 'failed', error: 'right-handed DTL input required' });
+      return;
+    }
     let inputPath = shot?.metadata?.analysisInput?.path || shot?.media?.path;
     const bodyPath = latest?.progress?.bodyPath || shot?.metadata?.bodyPath || bodyArtifactPath(jobId);
     if (!inputPath || !fs.existsSync(inputPath)) {
@@ -2009,7 +2015,8 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
       updateDtlClubPointsV2Cache(jobId, { status: 'failed', error: 'DTL V2 meta generation failed' });
       return;
     }
-    const result = await requestDtlClubPointsV2SidecarAnalysis({ jobId, metaPath: generated.metaPath, bodyPath });
+    const impact = await scheduleAutomaticImpact(jobId, inputPath, fs.existsSync(bodyPath) ? bodyPath : null);
+    const result = await requestDtlClubPointsV2SidecarAnalysis({ jobId, metaPath: generated.metaPath, bodyPath, impactMs: impact?.candidate?.timeMs });
     if (!result) {
       updateDtlClubPointsV2Cache(jobId, {
         status: 'failed', metaPath: generated.metaPath, error: 'DTL V2 sidecar analysis failed',
@@ -3368,6 +3375,26 @@ app.get('/api/analyze/:jobId/review-video', async (req, res) => {
   return res.sendFile(path.basename(playbackPath), { root: path.dirname(path.resolve(playbackPath)) });
 });
 
+app.post('/api/analyze/:jobId/club-review', (req, res) => {
+  const { jobId } = req.params;
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) return res.sendStatus(400);
+  const shot = shotStore.getShotByJobId(jobId);
+  if (!shot) return res.sendStatus(404);
+  if (shot.metadata?.viewpoint === 'face_on' || shot.metadata?.handedness === 'left') {
+    return res.status(422).json({ ok: false, error: '현재 클럽 관측은 오른손 DTL 영상만 지원합니다.' });
+  }
+  const scheduled = scheduleDtlClubPointsV2Sidecar(jobId, { force: true });
+  if (scheduled.reason === 'primary analysis unavailable') return res.status(409).json({ ok: false, error: '영상 분석이 끝난 뒤 다시 시도해 주세요.' });
+  return res.status(202).json({ ok: true, ...scheduled });
+});
+
+app.get('/api/analyze/:jobId/club-review', (req, res) => {
+  const { jobId } = req.params;
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) return res.sendStatus(400);
+  if (!shotStore.getShotByJobId(jobId)) return res.sendStatus(404);
+  return res.json({ ok: true, jobId, sidecar: readAnalysisCache(jobId)?.dtlClubPointsV2 || null });
+});
+
 app.post('/api/analyze/:jobId/impact-review', async (req, res) => {
   const { jobId } = req.params;
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId) || (req.body?.automatic !== true && req.body?.confirmedInput !== true)) {
@@ -3422,7 +3449,7 @@ app.post('/api/analyze/:jobId/practice-review', async (req, res) => {
   if (['pending', 'queued', 'running'].includes(analysisStatus)) return res.status(409).json({ ok: false, error: '영상 분석이 끝난 뒤 다시 시도해 주세요.' });
   if (shot.metadata?.viewpoint === 'face_on') return res.status(422).json({ ok: false, error: '이 자세 비교는 DTL 영상만 지원합니다.' });
   const cached = videoSha256 ? impactReviews.read(jobId) : null;
-  if (videoSha256 && cached?.result?.videoSha256 !== videoSha256) {
+  if (videoSha256 && (cached?.result?.videoSha256 !== videoSha256 || cached?.result?.timingRevision !== 2)) {
     return res.status(409).json({ ok: false, error: '영상이 변경됐습니다. 새로고침 후 장면을 다시 선택해 주세요.' });
   }
   const inputPath = videoSha256 ? cached.inputPath : shot.metadata?.analysisInput?.path || shot.media?.path;

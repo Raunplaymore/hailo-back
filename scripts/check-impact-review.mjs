@@ -32,7 +32,7 @@ assert.equal(calls.length, 1);
 const root = await mkdtemp(join(tmpdir(), 'impact-cache-'));
 try {
   const video=join(root,'video.mp4'); await writeFile(video,'original video');
-  const result = (jobId) => ({ok:true, jobId, status:'reference_candidate',modelSha256:'70b338b519565f870ed1fce044a0453f828773e53b9fa9d024391b3b4cf57733',publicValue:null,automaticCoachingReady:false,appliedToPrimary:false,inputScopeConfirmed:false});
+  const result = (jobId) => ({ok:true, jobId, status:'reference_candidate',timingRevision:2,modelSha256:'70b338b519565f870ed1fce044a0453f828773e53b9fa9d024391b3b4cf57733',publicValue:null,automaticCoachingReady:false,appliedToPrimary:false,inputScopeConfirmed:false});
   let runs=0; let release;
   const gate=new Promise(resolve=>{release=resolve;});
   const cache=cacheModule.createImpactReviewCache({dataDir:root,run:async (id)=>{runs++;await gate;return result(id);}});
@@ -42,8 +42,15 @@ try {
   await cache.schedule('job',video); assert.equal(runs,1,'saved result must be reused');
   const reopened=cacheModule.createImpactReviewCache({dataDir:root,run:async ()=>{throw Error('must not recompute after restart');}});
   await reopened.schedule('job',video);
+  const savedPath=join(root,'impact-review-results','job.json');
+  const stale=JSON.parse(await readFile(savedPath,'utf8'));
+  delete stale.result.timingRevision;
+  await writeFile(savedPath,JSON.stringify(stale));
+  assert.equal(cache.read('job').inputPath,video,'old video identity must stay readable during timing migration');
+  assert.equal(cache.read('job').result.timingRevision,undefined);
+  await cache.schedule('job',video); assert.equal(runs,2,'old timing must be recomputed');
   await writeFile(video,'changed source video');
-  await cache.schedule('job',video); assert.equal(runs,2,'changed video must invalidate cache');
+  await cache.schedule('job',video); assert.equal(runs,3,'changed video must invalidate cache');
   const retry=cacheModule.createImpactReviewCache({dataDir:join(root,'retry'),run:async(id)=>{if(id==='bad')throw Error('failed');return result(id);}});
   await assert.rejects(retry.schedule('bad',video));
   assert.equal((await retry.schedule('good',video)).jobId,'good','failed job must not poison later queued jobs');

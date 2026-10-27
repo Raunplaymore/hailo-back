@@ -3,13 +3,13 @@ import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 const source=readFileSync(new URL('../server.js',import.meta.url),'utf8');
 const route=source.slice(source.indexOf("app.post('/api/analyze/:jobId/practice-review'"),source.indexOf("app.get('/api/analyze/:jobId',"));
-let fileSize=100, analysisCache=null;
+let fileSize=100, analysisCache=null, timingRevision=2;
 let handler, upstream={ok:true,json:{ok:true,status:'withheld'}}, calls=[];
 const shot={status:'done',metadata:{analysisInput:{path:'/uploads/original.mp4'}}};
 vm.runInNewContext(route,{
  app:{post:(_path,fn)=>handler=fn}, fs:{existsSync:()=>true,statSync:()=>({size:fileSize,mtimeMs:20})},
  shotStore:{getShotByJobId:id=>id==='known'?shot:null},
- impactReviews:{read:()=>({inputPath:'/uploads/converted.mp4',size:100,mtimeMs:20,result:{videoSha256:'a'.repeat(64),candidate:{timeMs:550}}})},
+ impactReviews:{read:()=>({inputPath:'/uploads/converted.mp4',size:100,mtimeMs:20,result:{timingRevision,videoSha256:'a'.repeat(64),candidate:{timeMs:550}}})},
  readAnalysisCache:()=>analysisCache,
  bodyArtifactPath:id=>`/data/body/${id}.json`,inferUrl:p=>p,
  inferFetchJson:async(url,options)=>{calls.push({url,...options});return upstream;},
@@ -44,6 +44,11 @@ await request({...valid,mode:'coaching',confirmedFrames:false,videoSha256:'a'.re
 assert.equal(calls.at(-1).url,'/v1/coaching-review');
 assert.equal(calls.at(-1).body.impactMs,550,'coaching also uses only the stored candidate');
 assert.equal(calls.at(-1).body.confirmedFrames,undefined);
+timingRevision=undefined;
+const beforeStale=calls.length;
+assert.equal((await request({...valid,mode:'coaching',videoSha256:'a'.repeat(64)})).statusCode,409,'old frame mapping must be recomputed before coaching');
+assert.equal(calls.length,beforeStale,'stale timing must not reach inference');
+timingRevision=2;
 upstream={ok:false,status:409,json:{detail:'busy'}};
 assert.equal((await request({...valid,mode:'coaching',videoSha256:'a'.repeat(64)})).statusCode,409,'bounded inference exposes retryable busy state');
 console.log('practice review routing, input identity and failure checks passed');

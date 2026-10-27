@@ -21,12 +21,12 @@ function createImpactReviewCache({ dataDir, run }) {
     const key = JSON.stringify([jobId, identity]);
     if (active.has(key)) return active.get(key);
     const cached = read(jobId);
-    if (cached && cached.result?.modelSha256 === MODEL_SHA256
+    if (cached && cached.result?.modelSha256 === MODEL_SHA256 && cached.result?.timingRevision === 2
       && Object.keys(identity).every((k) => cached[k] === identity[k])) return Promise.resolve(cached.result);
     const work = tail.then(async () => {
       const result = await run(jobId, source, bodyPath);
       if (result?.ok !== true || result.status !== 'reference_candidate' || result.jobId !== jobId
-        || result.modelSha256 !== MODEL_SHA256 || result.publicValue !== null
+        || result.modelSha256 !== MODEL_SHA256 || result.timingRevision !== 2 || result.publicValue !== null
         || result.automaticCoachingReady !== false || result.appliedToPrimary !== false
         || result.inputScopeConfirmed !== false) throw new Error('Invalid automatic impact candidate');
       fs.mkdirSync(directory, { recursive: true });
