@@ -1937,6 +1937,7 @@ async function requestUploadMetaGeneration({
 
 async function requestDtlClubPointsV2MetaGeneration({
   jobId,
+  metadataJobId,
   filename,
   inputPath,
   durationSec,
@@ -1947,7 +1948,7 @@ async function requestDtlClubPointsV2MetaGeneration({
   const response = await inferFetchJson(url, {
     method: 'POST',
     body: {
-      jobId: `${jobId}-dtl-v2`,
+      jobId: metadataJobId || `${jobId}-dtl-v2`,
       filename,
       inputPath,
       model: 'dtl_club_points_v2',
@@ -1979,7 +1980,7 @@ async function requestDtlClubPointsV2SidecarAnalysis({ jobId, metaPath, bodyPath
 }
 
 let dtlClubPointsV2Tail = Promise.resolve();
-const activeDtlClubPointsV2 = new Set();
+const activeDtlClubPointsV2 = new Map();
 
 function summarizeDtlClubPointsV2(result, metaPath, durationMs) {
   const tracking = result?.metrics?.trackingQuality || null;
@@ -2015,44 +2016,72 @@ function updateDtlClubPointsV2Cache(jobId, sidecar) {
   return writeAnalysisCache(jobId, { ...cache, dtlClubPointsV2: sidecar }, { scheduleArchive: false });
 }
 
+function updateDtlClubRefresh(jobId, refreshId, patch) {
+  const cache = readAnalysisCache(jobId);
+  if (!cache || cache.dtlClubRefresh?.id !== refreshId) return null;
+  return writeAnalysisCache(jobId, {
+    ...cache, dtlClubRefresh: { ...cache.dtlClubRefresh, ...patch },
+  }, { scheduleArchive: false });
+}
+
 function isStaleDtlClubPointsV2Run(sidecar, nowMs = Date.now()) {
   if (sidecar?.status !== 'running' || typeof sidecar.startedAt !== 'string') return false;
   const startedAtMs = Date.parse(sidecar.startedAt);
   return Number.isFinite(startedAtMs) && nowMs - startedAtMs > DTL_V2_STALE_RUNNING_MS;
 }
 
-function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
-  if (activeDtlClubPointsV2.has(jobId)) return { scheduled: false, reason: 'already scheduled' };
+function scheduleDtlClubPointsV2Sidecar(jobId, { force = false, refresh = false } = {}) {
+  if (activeDtlClubPointsV2.has(jobId)) {
+    const runningId = activeDtlClubPointsV2.get(jobId);
+    return { scheduled: false, reason: 'already scheduled', ...(refresh && runningId ? { refreshId: runningId } : {}) };
+  }
   const cache = readAnalysisCache(jobId);
   if (!cache || cache.status !== 'done') return { scheduled: false, reason: 'primary analysis unavailable' };
   const current = cache.dtlClubPointsV2;
   const staleRunning = isStaleDtlClubPointsV2Run(current);
   // Explicit refresh upgrades legacy sidecars once; live/current work is reused.
   if (
-    (current?.status === 'succeeded' && (!force || current.observations?.revision === 1))
+    (current?.status === 'succeeded' && !refresh && (!force || current.observations?.revision === 1))
     || (current?.status === 'queued' && !force)
     || (current?.status === 'running' && !(force && staleRunning))
   ) {
     return { scheduled: false, reason: current?.status || 'already scheduled' };
   }
 
-  updateDtlClubPointsV2Cache(jobId, {
-    status: 'queued', model: 'dtl_club_points_v2', queuedAt: new Date().toISOString(),
-  });
-  activeDtlClubPointsV2.add(jobId);
+  const refreshId = refresh ? randomUUID() : null;
+  const debugSidecar = cache.analysis?.debug?.dtlClubPointsV2 || null;
+  const baselineSidecar = refresh ? JSON.stringify([current || null, debugSidecar]) : null;
+  if (refresh) {
+    writeAnalysisCache(jobId, { ...cache, dtlClubRefresh: { id: refreshId, status: 'queued', queuedAt: new Date().toISOString() } }, { scheduleArchive: false });
+  } else {
+    updateDtlClubPointsV2Cache(jobId, {
+      status: 'queued', model: 'dtl_club_points_v2', queuedAt: new Date().toISOString(),
+    });
+  }
+  const updateRun = (patch) => refresh
+    ? updateDtlClubRefresh(jobId, refreshId, patch)
+    : updateDtlClubPointsV2Cache(jobId, patch);
+  activeDtlClubPointsV2.set(jobId, refreshId);
   const run = dtlClubPointsV2Tail.then(async () => {
     const latest = readAnalysisCache(jobId);
     const shot = shotStore.getShotByJobId(jobId);
-    if (shot?.metadata?.viewpoint === 'face_on' || shot?.metadata?.handedness === 'left') {
-      updateDtlClubPointsV2Cache(jobId, { status: 'failed', error: 'right-handed DTL input required' });
+    if (refresh && (latest?.status !== 'done' || latest.dtlClubRefresh?.id !== refreshId
+      || JSON.stringify([latest.dtlClubPointsV2 || null, latest.analysis?.debug?.dtlClubPointsV2 || null]) !== baselineSidecar)) {
+      updateRun({ status: 'failed', error: 'Saved analysis changed before club refresh' });
       return;
     }
-    let inputPath = shot?.metadata?.analysisInput?.path || shot?.media?.path;
+    if (shot?.metadata?.viewpoint === 'face_on' || shot?.metadata?.handedness === 'left') {
+      updateRun({ status: 'failed', error: 'right-handed DTL input required' });
+      return;
+    }
+    const shotInputPath = shot?.metadata?.analysisInput?.path || shot?.media?.path;
+    let inputPath = shotInputPath;
     const bodyPath = latest?.progress?.bodyPath || shot?.metadata?.bodyPath || bodyArtifactPath(jobId);
     if (!inputPath || !fs.existsSync(inputPath)) {
-      updateDtlClubPointsV2Cache(jobId, { status: 'failed', error: 'analysis input unavailable' });
+      updateRun({ status: 'failed', error: 'analysis input unavailable' });
       return;
     }
+    const sourceIdentity = refresh ? fs.statSync(shotInputPath) : null;
     // Upload analysis normally leaves a converted MP4 in analysisInput. Legacy
     // re-analysis may only have the original MOV, while camera file inference
     // deliberately accepts MP4/H264/JPEG inputs. Reuse the same preparation
@@ -2060,40 +2089,60 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
     if (path.extname(inputPath).toLowerCase() === '.mov') {
       const prepared = await prepareVideoForAnalysis(inputPath, shot?.media?.filename || path.basename(inputPath));
       if (!prepared.ok || !prepared.path) {
-        updateDtlClubPointsV2Cache(jobId, { status: 'failed', error: 'DTL V2 video preparation failed' });
+        updateRun({ status: 'failed', error: 'DTL V2 video preparation failed' });
         return;
       }
       inputPath = prepared.path;
     }
-    updateDtlClubPointsV2Cache(jobId, {
+    const videoIdentity = refresh ? fs.statSync(inputPath) : null;
+    const hasBody = fs.existsSync(bodyPath);
+    const bodyIdentity = refresh && hasBody ? fs.statSync(bodyPath) : null;
+    updateRun({
       status: 'running', model: 'dtl_club_points_v2', startedAt: new Date().toISOString(),
     });
     const videoMeta = await getVideoMeta(inputPath);
     const generated = await requestDtlClubPointsV2MetaGeneration({
       jobId,
+      metadataJobId: refresh ? `club-refresh-${refreshId}` : undefined,
       filename: shot?.media?.filename || path.basename(inputPath),
       inputPath,
       durationSec: Number.isFinite(videoMeta?.durationMs) ? videoMeta.durationMs / 1000 : undefined,
       videoMeta,
     });
     if (!generated) {
-      updateDtlClubPointsV2Cache(jobId, { status: 'failed', error: 'DTL V2 meta generation failed' });
+      updateRun({ status: 'failed', error: 'DTL V2 meta generation failed' });
       return;
     }
-    const impact = await scheduleAutomaticImpact(jobId, inputPath, fs.existsSync(bodyPath) ? bodyPath : null);
-    const result = await requestDtlClubPointsV2SidecarAnalysis({ jobId, metaPath: generated.metaPath, bodyPath, impactMs: impact?.candidate?.timeMs });
+    const impact = await scheduleAutomaticImpact(jobId, inputPath, hasBody ? bodyPath : null);
+    const result = await requestDtlClubPointsV2SidecarAnalysis({ jobId, metaPath: generated.metaPath, bodyPath: refresh && !hasBody ? null : bodyPath, impactMs: impact?.candidate?.timeMs });
     if (!result) {
-      updateDtlClubPointsV2Cache(jobId, {
+      updateRun({
         status: 'failed', metaPath: generated.metaPath, error: 'DTL V2 sidecar analysis failed',
       });
       return;
     }
     const sidecar = summarizeDtlClubPointsV2(result, generated.metaPath, generated.durationMs);
     const updated = readAnalysisCache(jobId);
+    const updatedShot = refresh ? shotStore.getShotByJobId(jobId) : null;
+    const updatedInputPath = updatedShot?.metadata?.analysisInput?.path || updatedShot?.media?.path;
+    const updatedBodyPath = refresh ? updated?.progress?.bodyPath || updatedShot?.metadata?.bodyPath || bodyArtifactPath(jobId) : null;
+    if (refresh && (!updated || updated.status !== 'done' || updated.dtlClubRefresh?.id !== refreshId
+      || !updatedInputPath || path.resolve(updatedInputPath) !== path.resolve(shotInputPath)
+      || !updatedBodyPath || path.resolve(updatedBodyPath) !== path.resolve(bodyPath)
+      || updatedShot?.metadata?.viewpoint !== shot?.metadata?.viewpoint
+      || updatedShot?.metadata?.handedness !== shot?.metadata?.handedness
+      || !matchesVideoIdentity(sourceIdentity, fs.statSync(shotInputPath))
+      || JSON.stringify([updated.dtlClubPointsV2 || null, updated.analysis?.debug?.dtlClubPointsV2 || null]) !== baselineSidecar
+      || !matchesVideoIdentity(videoIdentity, fs.statSync(inputPath))
+      || fs.existsSync(bodyPath) !== hasBody
+      || (bodyIdentity && !matchesVideoIdentity(bodyIdentity, fs.statSync(bodyPath)))
+      || sidecar.status !== 'succeeded')) {
+      throw new Error('Saved input or analysis changed during club refresh');
+    }
     const analysis = updated?.analysis && typeof updated.analysis === 'object' ? { ...updated.analysis } : null;
     const takeawayMs = sidecar.takeaway.timeMs;
     const primaryTakeaway = analysis?.events?.takeaway ?? analysis?.events?.takeawayMs;
-    if (analysis && primaryTakeaway == null && Number.isFinite(takeawayMs)
+    if (!refresh && analysis && primaryTakeaway == null && Number.isFinite(takeawayMs)
       && ['confirmed', 'reference'].includes(sidecar.takeaway.status)) {
       analysis.events = Object.prototype.hasOwnProperty.call(analysis.events || {}, 'takeawayMs')
         ? { ...analysis.events, takeawayMs }
@@ -2107,18 +2156,44 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false } = {}) {
     if (analysis) {
       analysis.debug = { ...(analysis.debug || {}), dtlClubPointsV2: sidecar };
     }
+    const saveIdentity = (file, stat) => ({ path: path.resolve(file), ...Object.fromEntries(
+      ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].map(key => [key, stat[key]]),
+    ) });
     const persisted = writeAnalysisCache(jobId, {
       ...updated,
       analysis,
       dtlClubPointsV2: sidecar,
+      ...(refresh ? {
+        dtlClubPointsV2BeforeRefresh: updated.dtlClubPointsV2BeforeRefresh || current || debugSidecar || null,
+        ...(current && debugSidecar && JSON.stringify(current) !== JSON.stringify(debugSidecar) && !updated.dtlClubPointsV2DebugBeforeRefresh
+          ? { dtlClubPointsV2DebugBeforeRefresh: debugSidecar } : {}),
+        dtlClubRefresh: { ...updated.dtlClubRefresh, status: 'succeeded', completedAt: new Date().toISOString() },
+        dtlClubRefreshSource: {
+          metaPath: sidecar.metaPath, completedAt: sidecar.completedAt,
+          source: saveIdentity(shotInputPath, sourceIdentity), input: saveIdentity(inputPath, videoIdentity),
+          body: hasBody ? saveIdentity(bodyPath, bodyIdentity) : { path: path.resolve(bodyPath), absent: true },
+          viewpoint: shot?.metadata?.viewpoint ?? null, handedness: shot?.metadata?.handedness ?? null,
+        },
+      } : {}),
     }, { scheduleArchive: false });
-    if (persisted) queueNasArchive(persisted, { force: true });
+    if (!persisted && refresh) throw new Error('Could not save club refresh');
+    if (persisted) {
+      if (!refresh) queueNasArchive(persisted, { force: true });
+      else {
+        try { queueNasArchive(persisted, { force: true }); }
+        catch (error) {
+          console.warn(`[nas-archive] ${jobId} could not queue refreshed analysis: ${error.message}`);
+          try { updateNasArchiveStatus(jobId, { state: 'failed', error: 'Could not queue refreshed analysis', retryAt: null }); }
+          catch (statusError) { console.warn(`[nas-archive] ${jobId} could not record failure: ${statusError.message}`); }
+        }
+      }
+    }
   });
   dtlClubPointsV2Tail = run.catch((error) => {
     console.warn(`[dtl-v2-sidecar] ${jobId} failed: ${error.message}`);
-    updateDtlClubPointsV2Cache(jobId, { status: 'failed', error: error.message });
+    updateRun({ status: 'failed', error: error.message });
   }).finally(() => activeDtlClubPointsV2.delete(jobId));
-  return { scheduled: true, reason: 'queued' };
+  return { scheduled: true, reason: 'queued', ...(refresh ? { refreshId } : {}) };
 }
 
 function eventTimeMs(events, key) {
@@ -3323,6 +3398,24 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
         });
         if (analysis && typeof analysis === 'object') {
           analysis.progress = progress;
+          const latest = readAnalysisCache(jobId);
+          const saved = latest?.dtlClubRefreshSource;
+          const currentShot = shotStore.getShotByJobId(jobId);
+          const source = currentShot?.metadata?.analysisInput?.path || currentShot?.media?.path;
+          const body = latest?.progress?.bodyPath || currentShot?.metadata?.bodyPath || bodyArtifactPath(jobId);
+          const sameFile = (identity, file) => identity && typeof file === 'string'
+            && identity.path === path.resolve(file) && matchesVideoIdentity(identity, fs.statSync(file));
+          try {
+            if (latest?.dtlClubPointsV2?.status === 'succeeded' && saved
+              && saved.metaPath === latest.dtlClubPointsV2.metaPath && saved.completedAt === latest.dtlClubPointsV2.completedAt
+              && sameFile(saved.source, source) && sameFile(saved.input, saved.input?.path)
+              && body && saved.body?.path === path.resolve(body)
+              && (saved.body.absent ? !fs.existsSync(body) : sameFile(saved.body, body))
+              && saved.viewpoint === (currentShot?.metadata?.viewpoint ?? null)
+              && saved.handedness === (currentShot?.metadata?.handedness ?? null)) {
+              analysis.debug = { ...(analysis.debug || {}), dtlClubPointsV2: latest.dtlClubPointsV2 };
+            }
+          } catch { /* A missing or changed input cannot reuse the saved observation. */ }
         }
         persist({
           status: nextStatus,
@@ -3459,14 +3552,17 @@ app.get('/api/analyze/:jobId/review-video', async (req, res) => {
 
 app.post('/api/analyze/:jobId/club-review', (req, res) => {
   const { jobId } = req.params;
-  if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) return res.sendStatus(400);
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)
+    || (req.body?.refresh !== undefined && typeof req.body.refresh !== 'boolean')) return res.sendStatus(400);
   const shot = shotStore.getShotByJobId(jobId);
   if (!shot) return res.sendStatus(404);
   if (shot.metadata?.viewpoint === 'face_on' || shot.metadata?.handedness === 'left') {
     return res.status(422).json({ ok: false, error: '현재 클럽 관측은 오른손 DTL 영상만 지원합니다.' });
   }
-  const scheduled = scheduleDtlClubPointsV2Sidecar(jobId, { force: true });
+  const refresh = req.body?.refresh === true;
+  const scheduled = scheduleDtlClubPointsV2Sidecar(jobId, { force: true, refresh });
   if (scheduled.reason === 'primary analysis unavailable') return res.status(409).json({ ok: false, error: '영상 분석이 끝난 뒤 다시 시도해 주세요.' });
+  if (refresh && scheduled.reason === 'already scheduled' && !scheduled.refreshId) return res.status(409).json({ ok: false, error: '클럽 분석이 진행 중입니다. 완료 후 다시 시도해 주세요.' });
   return res.status(202).json({ ok: true, ...scheduled });
 });
 
@@ -3474,7 +3570,12 @@ app.get('/api/analyze/:jobId/club-review', (req, res) => {
   const { jobId } = req.params;
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) return res.sendStatus(400);
   if (!shotStore.getShotByJobId(jobId)) return res.sendStatus(404);
-  return res.json({ ok: true, jobId, sidecar: readAnalysisCache(jobId)?.dtlClubPointsV2 || null });
+  const cache = readAnalysisCache(jobId);
+  let refresh = cache?.dtlClubRefresh || null;
+  if (refresh && ['queued', 'running'].includes(refresh.status) && activeDtlClubPointsV2.get(jobId) !== refresh.id) {
+    refresh = { ...refresh, status: 'interrupted' };
+  }
+  return res.json({ ok: true, jobId, sidecar: cache?.dtlClubPointsV2 || null, refresh });
 });
 
 app.post('/api/analyze/:jobId/impact-review', async (req, res) => {

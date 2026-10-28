@@ -16,7 +16,7 @@ const context = {
   shotStore: {getShotByJobId: () => null}, bodyArtifactPath: () => null,
   hydrateOverlayFromBodyArtifact: async a => a, inferUrl: p => p,
   inferFetchJson: async url => {inferCalls++; return {ok: true, json: url.endsWith('/result') ? result : {status: 'done'}};},
-  mapInferStatus: s => s, buildGroupedProgress: stage => ({stage}), inferAnalysisPath: () => '/tmp/result',
+  mapInferStatus: s => s, buildGroupedProgress: (stage, patch = {}) => ({stage, ...patch}), inferAnalysisPath: () => '/tmp/result',
   normalizeInferResult: () => result,
   writeAnalysisCache: (_id, value) => {writes++; cache = value; return value;},
   scheduleDtlClubPointsV2Sidecar: () => {schedules++;},
@@ -37,6 +37,28 @@ cache = {...cache, analysis: {...result, analysisVersion: 'old'}};
 await context.fetchInferJobPayload('job', {includeResult: true});
 assert.equal(cache.analysis.analysisVersion, 'current', 'old versions must still refresh');
 
+// A refreshed club result survives a primary-result reload only for the same saved inputs.
+const identity = {dev: 1, ino: 2, size: 3, mtimeMs: 4, ctimeMs: 5};
+let currentIdentity = identity;
+context.fs.existsSync = () => true;
+context.fs.statSync = () => currentIdentity;
+context.matchesVideoIdentity = (saved, stat) => Object.keys(identity).every(key => saved[key] === stat[key]);
+context.shotStore.getShotByJobId = () => ({media: {path: '/video.mp4'}, metadata: {}});
+context.normalizeInferResult = () => structuredClone(result);
+const sidecar = {status: 'succeeded', marker: 'refreshed', metaPath:'/tmp/refresh.meta.json', completedAt:'finished'};
+cache = {status:'done', analysis:{...result,analysisVersion:'old'}, progress:{bodyPath:'/body.json'}, dtlClubPointsV2:sidecar,
+  dtlClubRefresh:{status:'succeeded'}, dtlClubRefreshSource:{metaPath:sidecar.metaPath,completedAt:sidecar.completedAt,source:{path:'/video.mp4',...identity},input:{path:'/video.mp4',...identity},body:{path:'/body.json',...identity},viewpoint:null,handedness:null}};
+await context.fetchInferJobPayload('job', {includeResult:true});
+assert.equal(cache.analysis.debug.dtlClubPointsV2.marker,'refreshed');
+cache.analysis = {...result,analysisVersion:'old'};
+cache.dtlClubRefresh.status = 'failed';
+await context.fetchInferJobPayload('job', {includeResult:true});
+assert.equal(cache.analysis.debug.dtlClubPointsV2.marker,'refreshed','a failed later refresh preserves the last successful result');
+cache.analysis = {...result,analysisVersion:'old'};
+currentIdentity = {...identity,size:4};
+await context.fetchInferJobPayload('job', {includeResult:true});
+assert.equal(cache.analysis.debug?.dtlClubPointsV2,undefined,'changed input must not receive an old overlay');
+
 // Exercise the real scheduling guard even if a competing writer loses its disk flag.
 let queuedCache = {status: 'done'};
 let release;
@@ -53,7 +75,7 @@ const queueContext = {
   requestDtlClubPointsV2MetaGeneration: async () => {runs++; await gate; return null;},
 };
 vm.createContext(queueContext);
-vm.runInContext('let dtlClubPointsV2Tail = Promise.resolve(); const activeDtlClubPointsV2 = new Set();\n' + part('function scheduleDtlClubPointsV2Sidecar(', '\nfunction eventTimeMs'), queueContext);
+vm.runInContext('let dtlClubPointsV2Tail = Promise.resolve(); const activeDtlClubPointsV2 = new Map();\n' + part('function scheduleDtlClubPointsV2Sidecar(', '\nfunction eventTimeMs'), queueContext);
 assert.equal(queueContext.scheduleDtlClubPointsV2Sidecar('job').scheduled, true);
 queuedCache = {status: 'done'};
 assert.equal(queueContext.scheduleDtlClubPointsV2Sidecar('job', {force: true}).scheduled, false);
