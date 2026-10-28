@@ -18,7 +18,7 @@ const {
 } = require('./store/swingTrackingAnnotations');
 const { createNasArchive } = require('./storage/nasArchive');
 const { createReviewVideo } = require('./storage/reviewVideo');
-const { createImpactReviewCache } = require('./store/impactReviewCache');
+const { createImpactReviewCache, matchesVideoIdentity } = require('./store/impactReviewCache');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -80,6 +80,11 @@ function queueAutomaticImpact(jobId, inputPath, bodyPath = null, geometry = null
   scheduleAutomaticImpact(jobId, inputPath, bodyPath).catch((error) => console.warn(`[impact-candidate] ${jobId}: ${error.message}`));
 }
 
+function queueAutomaticImpactWithAvailableBody(jobId, inputPath, geometry = null) {
+  const bodyPath = bodyArtifactPath(jobId);
+  queueAutomaticImpact(jobId, inputPath, fs.existsSync(bodyPath) ? bodyPath : null, geometry);
+}
+
 function registerFileImpact(jobId, filename, inputPath, geometry) {
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId) || !fs.existsSync(inputPath) || !fs.statSync(inputPath).isFile()) return;
   const previous = shotStore.getShotByMediaName(filename);
@@ -95,7 +100,7 @@ function registerFileImpact(jobId, filename, inputPath, geometry) {
     media: previous?.media || { filename, path: inputPath, size: fs.statSync(inputPath).size },
     metadata,
   });
-  queueAutomaticImpact(jobId, metadata.analysisInput.path, null, metadata);
+  queueAutomaticImpactWithAvailableBody(jobId, metadata.analysisInput.path, metadata);
 }
 
 // Ensure upload directory exists
@@ -794,9 +799,9 @@ async function debugSourceTimeline(jobId, videoPath, frames, signal) {
   const cached = impactReviews.read(jobId);
   try {
     const stat = await fs.promises.stat(videoPath);
-    if (cached?.result?.timingRevision === 2 && cached.inputPath &&
+    if ([2, 3].includes(cached?.result?.timingRevision) && cached.inputPath &&
         path.resolve(cached.inputPath) === path.resolve(videoPath) &&
-        cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+        matchesVideoIdentity(cached, stat)) {
       times = cached.result.frameTimesMs;
     }
   } catch { /* The probe below will report an unreadable video. */ }
@@ -2446,7 +2451,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
   createPendingShot();
 
   if (explicitMetaPath) {
-    queueAutomaticImpact(jobId, file.path);
+    queueAutomaticImpactWithAvailableBody(jobId, file.path, meta);
     progress = buildGroupedProgress('club_ready', {
       analysisPath: 'infer',
       metaPath: effectiveMetaPath,
@@ -3437,11 +3442,17 @@ app.get('/api/analyze/:jobId/review-video', async (req, res) => {
   const { jobId } = req.params;
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) return res.sendStatus(400);
   const cached = impactReviews.read(jobId);
-  if (req.query.v && cached?.result?.videoSha256 !== req.query.v) return res.sendStatus(409);
+  const bound = req.query.v !== undefined;
+  if (bound && (typeof req.query.v !== 'string' || !/^[a-f0-9]{64}$/.test(req.query.v)
+      || cached?.result?.videoSha256 !== req.query.v || !Array.isArray(cached.result.frameTimesMs)
+      || cached.result.frameTimesMs.length < 4)) return res.sendStatus(409);
   const shot = shotStore.getShotByJobId(jobId);
-  const inputPath = req.query.v ? cached?.inputPath : shot?.metadata?.analysisInput?.path || shot?.media?.path;
-  if (!inputPath || !fs.existsSync(inputPath)) return res.sendStatus(404);
-  const playbackPath = req.query.quality === 'original' ? inputPath : await reviewVideoPath(inputPath);
+  const inputPath = bound ? cached?.inputPath : shot?.metadata?.analysisInput?.path || shot?.media?.path;
+  if (!inputPath || !fs.existsSync(inputPath)) return res.sendStatus(bound ? 409 : 404);
+  const stillMatches = async () => matchesVideoIdentity(cached, await fs.promises.stat(inputPath).catch(() => null));
+  if (bound && !await stillMatches()) return res.sendStatus(409);
+  const playbackPath = req.query.quality === 'original' ? inputPath : await reviewVideoPath(inputPath, bound ? cached.result.frameTimesMs : null);
+  if (bound && !await stillMatches()) return res.sendStatus(409);
   // A known storage root keeps .converted out of Express's hidden request-path check.
   return res.sendFile(path.basename(playbackPath), { root: path.dirname(path.resolve(playbackPath)) });
 });
@@ -3520,7 +3531,7 @@ app.post('/api/analyze/:jobId/practice-review', async (req, res) => {
   if (['pending', 'queued', 'running'].includes(analysisStatus)) return res.status(409).json({ ok: false, error: '영상 분석이 끝난 뒤 다시 시도해 주세요.' });
   if (shot.metadata?.viewpoint === 'face_on') return res.status(422).json({ ok: false, error: '이 자세 비교는 DTL 영상만 지원합니다.' });
   const cached = videoSha256 ? impactReviews.read(jobId) : null;
-  if (videoSha256 && (cached?.result?.videoSha256 !== videoSha256 || cached?.result?.timingRevision !== 2)) {
+  if (videoSha256 && (cached?.result?.videoSha256 !== videoSha256 || cached?.result?.timingRevision !== 3)) {
     return res.status(409).json({ ok: false, error: '영상이 변경됐습니다. 새로고침 후 장면을 다시 선택해 주세요.' });
   }
   const inputPath = videoSha256 ? cached.inputPath : shot.metadata?.analysisInput?.path || shot.media?.path;
@@ -3530,7 +3541,7 @@ app.post('/api/analyze/:jobId/practice-review', async (req, res) => {
   }
   if (cached) {
     const stat = fs.statSync(inputPath);
-    if (stat.size !== cached.size || stat.mtimeMs !== cached.mtimeMs) {
+    if (!matchesVideoIdentity(cached, stat)) {
       return res.status(409).json({ ok: false, error: '영상이 변경됐습니다. 새로고침 후 장면을 다시 선택해 주세요.' });
     }
   }

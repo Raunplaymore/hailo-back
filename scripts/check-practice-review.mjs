@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
+import cacheModule from '../store/impactReviewCache.js';
 const source=readFileSync(new URL('../server.js',import.meta.url),'utf8');
 const route=source.slice(source.indexOf("app.post('/api/analyze/:jobId/practice-review'"),source.indexOf("app.get('/api/analyze/:jobId',"));
-let fileSize=100, analysisCache=null, timingRevision=2;
+let fileSize=100, fileChange=40, analysisCache=null, timingRevision=3;
 let handler, upstream={ok:true,json:{ok:true,status:'withheld'}}, calls=[];
 const shot={status:'done',metadata:{analysisInput:{path:'/uploads/original.mp4'}}};
 vm.runInNewContext(route,{
- app:{post:(_path,fn)=>handler=fn}, fs:{existsSync:()=>true,statSync:()=>({size:fileSize,mtimeMs:20})},
+ app:{post:(_path,fn)=>handler=fn}, fs:{existsSync:()=>true,statSync:()=>({dev:1,ino:7,size:fileSize,mtimeMs:20,ctimeMs:fileChange})}, matchesVideoIdentity:cacheModule.matchesVideoIdentity,
  shotStore:{getShotByJobId:id=>id==='known'?shot:null},
- impactReviews:{read:()=>({inputPath:'/uploads/converted.mp4',size:100,mtimeMs:20,result:{timingRevision,videoSha256:'a'.repeat(64),candidate:{timeMs:550}}})},
+ impactReviews:{read:()=>({inputPath:'/uploads/converted.mp4',dev:1,ino:7,size:100,mtimeMs:20,ctimeMs:40,result:{timingRevision,videoSha256:'a'.repeat(64),candidate:{timeMs:550}}})},
  readAnalysisCache:()=>analysisCache,
  bodyArtifactPath:id=>`/data/body/${id}.json`,inferUrl:p=>p,
  inferFetchJson:async(url,options)=>{calls.push({url,...options});return upstream;},
@@ -28,6 +29,7 @@ assert.equal(calls[0].body.inputPath,'/uploads/original.mp4');assert.equal(calls
 await request({...valid,videoSha256:'a'.repeat(64)});assert.equal(calls[1].body.inputPath,'/uploads/converted.mp4');
 assert.equal((await request({...valid,videoSha256:'b'.repeat(64)})).statusCode,409);
 fileSize=101;assert.equal((await request({...valid,videoSha256:'a'.repeat(64)})).statusCode,409);fileSize=100;
+fileChange=41;assert.equal((await request({...valid,videoSha256:'a'.repeat(64)})).statusCode,409);fileChange=40;
 shot.status='running';assert.equal((await request()).statusCode,409);
 analysisCache={status:'done'};assert.equal((await request()).statusCode,200);
 shot.status='done';analysisCache={status:'running'};assert.equal((await request()).statusCode,409);
@@ -47,8 +49,10 @@ assert.equal(calls.at(-1).body.confirmedFrames,undefined);
 timingRevision=undefined;
 const beforeStale=calls.length;
 assert.equal((await request({...valid,mode:'coaching',videoSha256:'a'.repeat(64)})).statusCode,409,'old frame mapping must be recomputed before coaching');
-assert.equal(calls.length,beforeStale,'stale timing must not reach inference');
 timingRevision=2;
+assert.equal((await request({...valid,mode:'coaching',videoSha256:'a'.repeat(64)})).statusCode,409,'revision 2 must be recomputed before coaching');
+assert.equal(calls.length,beforeStale,'stale timing must not reach inference');
+timingRevision=3;
 upstream={ok:false,status:409,json:{detail:'busy'}};
 assert.equal((await request({...valid,mode:'coaching',videoSha256:'a'.repeat(64)})).statusCode,409,'bounded inference exposes retryable busy state');
 console.log('practice review routing, input identity and failure checks passed');

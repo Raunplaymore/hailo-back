@@ -1,6 +1,9 @@
 const fs = require('fs');
 const path = require('path');
 const MODEL_SHA256 = '70b338b519565f870ed1fce044a0453f828773e53b9fa9d024391b3b4cf57733';
+const identityFields = ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'];
+const matchesVideoIdentity = (identity, stat) => Boolean(identity && stat && identityFields.every((key) =>
+  Number.isFinite(identity[key]) && identity[key] === stat[key]));
 
 function createImpactReviewCache({ dataDir, run }) {
   const directory = path.join(dataDir, 'impact-review-results');
@@ -17,18 +20,20 @@ function createImpactReviewCache({ dataDir, run }) {
     const source = path.resolve(inputPath);
     const stat = fs.statSync(source);
     if (!stat.isFile()) return Promise.reject(new Error('Video input is not a file'));
-    const identity = { inputPath: source, size: stat.size, mtimeMs: stat.mtimeMs };
+    const identity = { inputPath: source, ...Object.fromEntries(identityFields.map((key) => [key, stat[key]])) };
     const key = JSON.stringify([jobId, identity]);
     if (active.has(key)) return active.get(key);
     const cached = read(jobId);
-    if (cached && cached.result?.modelSha256 === MODEL_SHA256 && cached.result?.timingRevision === 2
+    if (cached && cached.result?.modelSha256 === MODEL_SHA256 && cached.result?.timingRevision === 3
       && Object.keys(identity).every((k) => cached[k] === identity[k])) return Promise.resolve(cached.result);
     const work = tail.then(async () => {
       const result = await run(jobId, source, bodyPath);
       if (result?.ok !== true || result.status !== 'reference_candidate' || result.jobId !== jobId
-        || result.modelSha256 !== MODEL_SHA256 || result.timingRevision !== 2 || result.publicValue !== null
+        || result.modelSha256 !== MODEL_SHA256 || result.timingRevision !== 3 || result.publicValue !== null
+        || !/^[a-f0-9]{64}$/.test(result.videoSha256 ?? '')
         || result.automaticCoachingReady !== false || result.appliedToPrimary !== false
         || result.inputScopeConfirmed !== false) throw new Error('Invalid automatic impact candidate');
+      if (!matchesVideoIdentity(identity, fs.statSync(source))) throw new Error('Video input changed during impact analysis');
       fs.mkdirSync(directory, { recursive: true });
       const file = path.join(directory, `${jobId}.json`);
       const temp = `${file}.tmp`;
@@ -43,4 +48,4 @@ function createImpactReviewCache({ dataDir, run }) {
   };
   return { read, schedule };
 }
-module.exports = { createImpactReviewCache };
+module.exports = { createImpactReviewCache, matchesVideoIdentity };

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import vm from "node:vm";
+import cacheModule from "../store/impactReviewCache.js";
 
 const jobId = "957e5457-4d13-46bf-88c6-65c467af8487";
 const source = await readFile(new URL("../server.js", import.meta.url), "utf8");
@@ -31,8 +32,9 @@ assert.equal(mapFrames([{ sourceTimeMs: 0 }], [0, 0]), null, "Duplicate video ti
 let probeCalls = 0;
 Object.assign(context, {
   path,
-  fs: { promises: { stat: async () => ({ size: 20, mtimeMs: 30 }) } },
-  impactReviews: { read: () => ({ inputPath: "/video.mp4", size: 20, mtimeMs: 30, result: { timingRevision: 2, frameTimesMs: [0, 16.667, 33.333, 50] } }) },
+  matchesVideoIdentity: cacheModule.matchesVideoIdentity,
+  fs: { promises: { stat: async () => ({ dev: 1, ino: 7, size: 20, mtimeMs: 30, ctimeMs: 40 }) } },
+  impactReviews: { read: () => ({ inputPath: "/video.mp4", dev: 1, ino: 7, size: 20, mtimeMs: 30, ctimeMs: 40, result: { timingRevision: 2, frameTimesMs: [0, 16.667, 33.333, 50] } }) },
   ensureFfmpegAvailability: async () => ({ ffprobe: true }),
   runCommand: async () => { probeCalls += 1; return { stdout: JSON.stringify({ frames: [{ best_effort_timestamp_time: "0" }, { best_effort_timestamp_time: ".016667" }, { best_effort_timestamp_time: ".033333" }, { best_effort_timestamp_time: ".050" }] }) }; },
 });
@@ -40,6 +42,15 @@ let timeline = await context.debugSourceTimeline("job", "/video.mp4", frames);
 assert.deepEqual(Array.from(timeline.indices), [0, 2, 3]);
 assert.equal(timeline.sourceAligned, true);
 assert.equal(probeCalls, 0, "A matching cached video timeline can be reused.");
+context.impactReviews.read = () => ({ inputPath: "/video.mp4", dev: 1, ino: 7, size: 20, mtimeMs: 30, ctimeMs: 40, result: { timingRevision: 3, frameTimesMs: [0, 16.667, 33.333, 50] } });
+timeline = await context.debugSourceTimeline("job", "/video.mp4", frames);
+assert.deepEqual(Array.from(timeline.indices), [0, 2, 3]);
+assert.equal(probeCalls, 0, "The new timing revision can reuse the same verified source clock.");
+context.impactReviews.read = () => ({ inputPath: "/video.mp4", size: 20, mtimeMs: 30, result: { timingRevision: 2, frameTimesMs: [0, 16.667, 33.333, 50] } });
+timeline = await context.debugSourceTimeline("job", "/video.mp4", frames);
+assert.deepEqual(Array.from(timeline.indices), [0, 2, 3]);
+assert.equal(probeCalls, 1, "Older caches without full file identity must use a fresh probe.");
+context.impactReviews.read = () => ({ inputPath: "/video.mp4", dev: 1, ino: 7, size: 20, mtimeMs: 30, ctimeMs: 40, result: { timingRevision: 3, frameTimesMs: [0, 16.667, 33.333, 50] } });
 const legacy = await context.debugSourceTimeline("job", "/video.mp4", [{}, {}, {}]);
 assert.deepEqual(Array.from(legacy.indices), [0, 1, 2]);
 assert.equal(legacy.sourceAligned, false, "A video clock does not verify old model detections.");
@@ -48,7 +59,7 @@ assert.equal(unmatched.sourceAligned, false, "Unmatched inference timestamps mus
 context.impactReviews.read = () => ({ inputPath: "/other.mp4", size: 20, mtimeMs: 30, result: { timingRevision: 2, frameTimesMs: [0, 33, 50] } });
 timeline = await context.debugSourceTimeline("job", "/video.mp4", frames);
 assert.deepEqual(Array.from(timeline.indices), [0, 2, 3]);
-assert.equal(probeCalls, 1, "A timeline from a different video must not be reused.");
+assert.equal(probeCalls, 2, "A timeline from a different video must not be reused.");
 context.runCommand = async () => ({ stdout: JSON.stringify({ frames: [{ best_effort_timestamp_time: ".125" }, { best_effort_timestamp_time: ".141667" }, { best_effort_timestamp_time: ".158333" }, { best_effort_timestamp_time: ".175" }] }) });
 timeline = await context.debugSourceTimeline("job", "/video.mp4", frames);
 assert.deepEqual(Array.from(timeline.indices), [0, 2, 3], "Nonzero initial video PTS must be relative to playback start.");
