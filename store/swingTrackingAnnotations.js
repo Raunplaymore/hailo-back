@@ -5,6 +5,7 @@ const SCHEMA_VERSION = 'swing-tracking-label-v2';
 const EVENT_KEYS = ['address', 'takeaway', 'top', 'impact', 'finish'];
 const POINT_KEYS = ['clubHead', 'clubHandle'];
 const VIEWPOINTS = new Set(['unknown', 'down_the_line', 'face_on']);
+const HANDEDNESS = new Set(['unknown', 'right', 'left']);
 const STATUSES = new Set(['draft', 'reviewed']);
 const VISIBILITIES = new Set(['visible', 'occluded', 'out_of_frame', 'unknown']);
 
@@ -39,6 +40,8 @@ function validateAnnotationIdentity(jobId, input) {
 }
 
 function finiteNumber(value) {
+  if ((typeof value !== 'number' && typeof value !== 'string') ||
+      (typeof value === 'string' && value.trim() === '')) return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -51,7 +54,7 @@ function sanitizePoint(value) {
   return {
     x: Math.round(x * 1_000_000) / 1_000_000,
     y: Math.round(y * 1_000_000) / 1_000_000,
-    source: value.source === 'model' ? 'model' : 'manual',
+    source: ['manual', 'model'].includes(value.source) ? value.source : 'unknown',
   };
 }
 
@@ -93,7 +96,7 @@ function sanitizeEvent(value) {
   return {
     frame: Math.round(frame),
     timeMs: Math.round(timeMs),
-    source: value.source === 'analysis' ? 'analysis' : 'manual',
+    source: ['manual', 'analysis'].includes(value.source) ? value.source : 'unknown',
   };
 }
 
@@ -110,8 +113,8 @@ function sanitizeAnnotation(jobId, input) {
   return {
     schemaVersion: SCHEMA_VERSION,
     jobId,
-    viewpoint: VIEWPOINTS.has(source.viewpoint) ? source.viewpoint : 'down_the_line',
-    handedness: source.handedness === 'left' ? 'left' : 'right',
+    viewpoint: VIEWPOINTS.has(source.viewpoint) ? source.viewpoint : 'unknown',
+    handedness: HANDEDNESS.has(source.handedness) ? source.handedness : 'unknown',
     status: STATUSES.has(source.status) ? source.status : 'draft',
     events,
     frames: dedupedFrames,
@@ -170,8 +173,8 @@ function createSwingTrackingAnnotationStore({ dataDir }) {
           return {
             jobId: annotation.jobId || entry.name.slice(0, -5),
             status: STATUSES.has(annotation.status) ? annotation.status : 'draft',
-            viewpoint: VIEWPOINTS.has(annotation.viewpoint) ? annotation.viewpoint : 'down_the_line',
-            handedness: annotation.handedness === 'left' ? 'left' : 'right',
+            viewpoint: VIEWPOINTS.has(annotation.viewpoint) ? annotation.viewpoint : 'unknown',
+            handedness: HANDEDNESS.has(annotation.handedness) ? annotation.handedness : 'unknown',
             labeledFrames: Array.isArray(annotation.frames) ? annotation.frames.length : 0,
             events,
             updatedAt: typeof annotation.updatedAt === 'string' ? annotation.updatedAt : null,

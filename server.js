@@ -769,6 +769,66 @@ function frameTimeMs(frame, index, fps) {
   return Number.isFinite(direct) ? Math.max(0, Math.round(direct)) : 0;
 }
 
+function mapDebugSourceFrames(frames, times) {
+  if (!frames.length || !Array.isArray(times) || !times.length ||
+      !times.every((time, i) => Number.isFinite(time) && time >= 0 && (i === 0 || time > times[i - 1])) ||
+      !frames.every((frame, i) => Number.isFinite(frame?.sourceTimeMs) && frame.sourceTimeMs >= 0 &&
+        (i === 0 || frame.sourceTimeMs > frames[i - 1].sourceTimeMs))) return null;
+  const mapped = [];
+  let next = 0;
+  for (const frame of frames) {
+    while (next < times.length && times[next] < frame.sourceTimeMs) next += 1;
+    const candidates = [next - 1, next].filter((i) => i >= 0 && i < times.length)
+      .map((i) => ({ index: i, error: Math.abs(times[i] - frame.sourceTimeMs) }))
+      .sort((a, b) => a.error - b.error);
+    const best = candidates[0];
+    if (!best || best.error > 1.1 || (candidates[1] && Math.abs(best.error - candidates[1].error) < 0.001) ||
+        (mapped.length && best.index <= mapped[mapped.length - 1])) return null;
+    mapped.push(best.index);
+  }
+  return mapped;
+}
+
+async function debugSourceTimeline(jobId, videoPath, frames, signal) {
+  let times = null;
+  const cached = impactReviews.read(jobId);
+  try {
+    const stat = await fs.promises.stat(videoPath);
+    if (cached?.result?.timingRevision === 2 && cached.inputPath &&
+        path.resolve(cached.inputPath) === path.resolve(videoPath) &&
+        cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+      times = cached.result.frameTimesMs;
+    }
+  } catch { /* The probe below will report an unreadable video. */ }
+  if (!Array.isArray(times)) {
+    const { ffprobe } = await ensureFfmpegAvailability();
+    if (!ffprobe) return null;
+    try {
+      const { stdout } = await runCommand('ffprobe', [
+        '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'frame=best_effort_timestamp_time',
+        '-of', 'json', videoPath,
+      ], { timeoutMs: 30_000, signal });
+      times = JSON.parse(stdout).frames.map((frame) =>
+        typeof frame.best_effort_timestamp_time === 'string' && frame.best_effort_timestamp_time.trim()
+          ? Number(frame.best_effort_timestamp_time) * 1000 : NaN);
+      times = times.map((time) => time - times[0]);
+    } catch (error) {
+      if (signal?.aborted || error?.name === 'AbortError') throw error;
+      return null;
+    }
+  }
+  if (!Array.isArray(times) || !times.length || !times.every((time, i) =>
+    Number.isFinite(time) && time >= 0 && (i === 0 || time > times[i - 1]))) return null;
+  const indices = mapDebugSourceFrames(frames, times);
+  if (indices) return { indices, times, sourceAligned: true };
+  const estimated = frames.map((frame, index) => {
+    const frameIndex = Number(frame?.frame ?? frame?.frameIndex ?? index);
+    return Number.isFinite(frameIndex) ? Math.round(frameIndex) : index;
+  });
+  if (!estimated.every((index, i) => index >= 0 && index < times.length && (i === 0 || index > estimated[i - 1]))) return null;
+  return { indices: estimated, times, sourceAligned: false };
+}
+
 function selectDebugFrames(frames, limit) {
   if (!Array.isArray(frames) || frames.length === 0) return [];
   const safeLimit = Math.max(1, Math.min(240, Number(limit) || 120));
@@ -2084,22 +2144,30 @@ async function buildDtlClubPointsV2EventBenchmark() {
   }]));
   let primaryJobs = 0;
   let v2Jobs = 0;
+  let reviewedJobs = 0;
+  let inScopeJobs = 0;
 
   for (const item of annotations) {
     const annotation = await swingTrackingAnnotations.load(item.jobId);
+    if (!annotation || annotation.status !== 'reviewed') continue;
+    reviewedJobs += 1;
+    if (annotation.viewpoint !== 'down_the_line' || annotation.handedness !== 'right') continue;
+    inScopeJobs += 1;
     const cache = readAnalysisCache(item.jobId);
-    if (!annotation || !cache) continue;
+    if (!cache) continue;
     const primaryEvents = cache.analysis?.events;
     const v2 = cache.dtlClubPointsV2 || cache.analysis?.debug?.dtlClubPointsV2;
     const v2Events = v2?.status === 'succeeded' ? v2.events : null;
     let primarySeen = false;
     let v2Seen = false;
     for (const key of SWING_EVENT_KEYS) {
-      const labeled = annotation.events?.[key]?.timeMs;
-      if (!Number.isFinite(labeled)) continue;
-      for (const [name, events] of [['primary', primaryEvents], ['v2', v2Events]]) {
-        const predicted = eventTimeMs(events, key);
-        if (!Number.isFinite(predicted)) continue;
+      const label = annotation.events?.[key];
+      const labeled = label?.timeMs;
+      if (label?.source !== 'manual' || !Number.isFinite(labeled)) continue;
+      const primaryTime = eventTimeMs(primaryEvents, key);
+      const v2Time = eventTimeMs(v2Events, key);
+      if (!Number.isFinite(primaryTime) || !Number.isFinite(v2Time)) continue;
+      for (const [name, predicted] of [['primary', primaryTime], ['v2', v2Time]]) {
         const score = scores[key][name];
         const errorMs = Math.abs(predicted - labeled);
         score.samples += 1;
@@ -2119,13 +2187,16 @@ async function buildDtlClubPointsV2EventBenchmark() {
     return [key, {
       primary,
       v2,
-      v2ImprovesMae: primary.maeMs != null && v2.maeMs != null ? v2.maeMs < primary.maeMs : null,
-      v2ImprovesWithin100Ms: primary.within100MsRate != null && v2.within100MsRate != null
-        ? v2.within100MsRate > primary.within100MsRate
+      v2ImprovesMae: primary.samples ? scores[key].v2.totalAbsoluteErrorMs < scores[key].primary.totalAbsoluteErrorMs : null,
+      v2ImprovesWithin100Ms: primary.samples
+        ? scores[key].v2.within100Ms > scores[key].primary.within100Ms
         : null,
     }];
   }));
-  return { annotationJobs: annotations.length, primaryJobs, v2Jobs, events };
+  return {
+    annotationJobs: annotations.length, reviewedJobs, inScopeJobs, primaryJobs, v2Jobs, events,
+    referencePolicy: 'reviewed_manual_paired', independentValidation: false,
+  };
 }
 
 async function requestBodyAnalysis({
@@ -3806,6 +3877,7 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
   if (!frames.length) {
     return res.status(404).json({ ok: false, message: 'meta frames missing', jobId, metaPath });
   }
+  const sourceTimeline = await debugSourceTimeline(jobId, videoPath, frames, abortController.signal);
   const bodyPath = bodyArtifactPath(jobId);
   const bodyArtifact = await readJsonFile(bodyPath);
   const bodyFrames = Array.isArray(bodyArtifact?.frames) ? bodyArtifact.frames : [];
@@ -3845,12 +3917,14 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
       error.name = 'AbortError';
       throw error;
     }
-    const timeMs = frameTimeMs(frame, index, meta?.fps);
     const frameIndex = Number(frame?.frame ?? frame?.frameIndex ?? index);
-    const safeFrameIndex = Number.isFinite(frameIndex) ? Math.round(frameIndex) : index;
+    const safeFrameIndex = sourceTimeline ? sourceTimeline.indices[index]
+      : Number.isFinite(frameIndex) ? Math.round(frameIndex) : index;
+    const timeMs = sourceTimeline ? Math.round(sourceTimeline.times[safeFrameIndex])
+      : frameTimeMs(frame, index, meta?.fps);
     requestProgress.currentFrame = safeFrameIndex;
     requestProgress.updatedAt = new Date().toISOString();
-    const imageName = `frame_${String(index).padStart(5, '0')}_n${String(safeFrameIndex).padStart(5, '0')}_${String(timeMs).padStart(6, '0')}.jpg`;
+    const imageName = `frame_${String(safeFrameIndex).padStart(5, '0')}_n${String(safeFrameIndex).padStart(5, '0')}_${String(timeMs).padStart(6, '0')}.jpg`;
     const imagePath = path.join(jobFrameDir, imageName);
     await extractDebugFrameImage(videoPath, imagePath, {
       timeMs,
@@ -3903,6 +3977,11 @@ app.get('/api/debug/infer/:jobId/frames', async (req, res) => {
       height: meta?.height ?? null,
       durationMs: meta?.durationMs ?? null,
       frames: frames.length,
+      timeBasis: sourceTimeline ? (sourceTimeline.sourceAligned ? 'source_pts' : 'video_pts_unverified') : 'fps_estimate',
+      legacyFrameNumbersChanged: !!sourceTimeline?.sourceAligned && frames.some((frame, index) => {
+        const previous = Number(frame?.frame ?? frame?.frameIndex ?? index);
+        return sourceTimeline.indices[index] !== (Number.isFinite(previous) ? Math.round(previous) : index);
+      }),
     },
     body: {
       bodyPath: bodyArtifact ? bodyPath : null,

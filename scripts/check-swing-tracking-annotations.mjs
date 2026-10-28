@@ -38,8 +38,21 @@ assert.equal(sanitized.frames[0].clubHead.x, 0.7);
 assert.equal(sanitized.frames[0].clubHandle, undefined);
 assert.equal(sanitized.frames[0].clubHeadVisibility, 'visible');
 assert.equal(sanitized.frames[0].clubHandleVisibility, 'occluded');
-assert.equal(sanitizeAnnotation(jobId, {}).handedness, 'right');
-assert.equal(sanitizeAnnotation(jobId, { handedness: 'unknown' }).handedness, 'right');
+const uncertain = sanitizeAnnotation(jobId, {
+  events: { impact: { frame: 2, timeMs: 34 } },
+  frames: [{ frame: 2, timeMs: 34, clubHead: { x: .5, y: .5 } }],
+});
+assert.equal(uncertain.events.impact.source, 'unknown', 'missing event provenance is not manual');
+assert.equal(uncertain.frames[0].clubHead.source, 'unknown', 'missing point provenance is not manual');
+assert.equal(sanitizeAnnotation(jobId, {}).viewpoint, 'unknown');
+assert.equal(sanitizeAnnotation(jobId, {}).handedness, 'unknown');
+assert.equal(sanitizeAnnotation(jobId, { handedness: 'unknown' }).handedness, 'unknown');
+for (const invalid of [null, '', ' ', false, []]) {
+  const bad = sanitizeAnnotation(jobId, { events: { impact: { frame: invalid, timeMs: 20, source: 'manual' } },
+    frames: [{ frame: 1, timeMs: 20, clubHead: { x: invalid, y: .5, source: 'manual' } }] });
+  assert.equal(bad.events.impact, null, 'missing frame must not become zero');
+  assert.equal(bad.frames.length, 0, 'missing coordinate must not become zero');
+}
 assert.equal(validateAnnotationIdentity(jobId, sanitized), null);
 assert.equal(
   validateAnnotationIdentity(jobId, { ...sanitized, jobId: 'different-job' }).code,
