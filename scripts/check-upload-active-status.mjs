@@ -102,12 +102,13 @@ try {
   assert.equal(upload.status, 200);
   const {jobId} = await upload.json();
   assert.ok(jobId);
-  const saved = JSON.parse(await readFile(path.join(dataDir, 'shots.json'), 'utf8')).shots.find(shot => shot.jobId === jobId);
-  assert.equal(saved.metadata.cameraConfig.lens, 'wide', 'ordinary nested camera metadata remains accepted');
   let bodyTimeout;
   try {
     await Promise.race([bodyStarted, new Promise((_, reject) => { bodyTimeout = setTimeout(() => reject(new Error('body request not started')), 10000); })]);
   } finally { clearTimeout(bodyTimeout); }
+  // The body request is gated after the last preparation write to shots.json.
+  const saved = JSON.parse(await readFile(path.join(dataDir, 'shots.json'), 'utf8')).shots.find(shot => shot.jobId === jobId);
+  assert.equal(saved.metadata.cameraConfig.lens, 'wide', 'ordinary nested camera metadata remains accepted');
   for (const suffix of ['', '/result']) {
     const response = await fetch(`${base}/api/analyze/${jobId}${suffix}`);
     const payload = await response.json();
