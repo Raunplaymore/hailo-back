@@ -800,6 +800,80 @@ function mapDebugSourceFrames(frames, times) {
   return mapped;
 }
 
+function markSourceFrameGaps(overlay, frames, times) {
+  const unknown = { overlay, verified: false, missingFrames: null };
+  if (overlay?.clubTimeSource !== 'video_pts' || !Array.isArray(overlay.clubFrames) || !overlay.clubFrames.length
+      || !Array.isArray(frames) || !frames.length || frames.length > 7200
+      || !Array.isArray(times) || times.length < 4 || times.length > 7200 || times[0] !== 0
+      || !times.every((t, i) => Number.isFinite(t) && t >= 0 && t <= 30000 && (!i || t - times[i - 1] > 2.2))) return unknown;
+  const metaIndices = mapDebugSourceFrames(frames, times);
+  const overlayIndices = mapDebugSourceFrames(overlay.clubFrames.map(row => ({ sourceTimeMs: row?.timeMs })), times);
+  if (!metaIndices || !overlayIndices) return unknown;
+  const sourceByFrame = new Map();
+  for (const [index, frame] of frames.entries()) {
+    const id = frame.frame == null ? index : frame.frame;
+    if (!Number.isSafeInteger(id) || id < 0 || sourceByFrame.has(id)) return unknown;
+    sourceByFrame.set(id, metaIndices[index]);
+  }
+  if (overlay.clubFrames.some((row, i) => !Number.isSafeInteger(row.frame)
+      || sourceByFrame.get(row.frame) !== overlayIndices[i])) return unknown;
+  const present = new Set(metaIndices);
+  const missing = times.map((_, i) => i).filter(i => !present.has(i));
+  const result = { ...overlay, clubFrames: overlay.clubFrames.map((row, i) => ({ ...row, timeMs: times[overlayIndices[i]] })) };
+  const stopTimes = [];
+  for (const row of result.clubFrames) for (const key of ['head', 'handle']) {
+    const field = `${key}ValidUntilMs`;
+    if (!(field in row)) continue;
+    if (!Number.isFinite(row[field])) return unknown;
+    stopTimes.push(row[field]);
+  }
+  const uniqueStops = [...new Set(stopTimes)].sort((a, b) => a - b);
+  const stopIndices = uniqueStops.length
+    ? mapDebugSourceFrames(uniqueStops.map(sourceTimeMs => ({ sourceTimeMs })), times) : [];
+  if (!stopIndices) return unknown;
+  const stopByTime = new Map(uniqueStops.map((time, i) => [time, stopIndices[i]]));
+  for (const [i, row] of result.clubFrames.entries()) {
+    for (const key of ['head', 'handle']) {
+      const field = `${key}ValidUntilMs`;
+      if (!(field in row)) continue;
+      const sourceIndex = stopByTime.get(row[field]);
+      if (sourceIndex === undefined || sourceIndex <= overlayIndices[i]) return unknown;
+      row[field] = times[sourceIndex];
+    }
+  }
+  let cursor = 0;
+  for (let i = 0; i < overlayIndices.length; i += 1) {
+    while (cursor < missing.length && missing[cursor] <= overlayIndices[i]) cursor += 1;
+    const next = overlayIndices[i + 1] ?? times.length;
+    if (cursor >= missing.length || missing[cursor] >= next) continue;
+    for (const key of ['head', 'handle']) {
+      const field = `${key}ValidUntilMs`;
+      const prior = result.clubFrames[i][field];
+      result.clubFrames[i][field] = Number.isFinite(prior) ? Math.min(prior, times[missing[cursor]]) : times[missing[cursor]];
+      if (i + 1 < result.clubFrames.length) result.clubFrames[i + 1][`${key}BreakBefore`] = true;
+    }
+  }
+  return { overlay: result, verified: true, missingFrames: missing.length };
+}
+
+async function verifyClubSourceCoverage({ jobId, metaPath, metaIdentity, inputPath, videoIdentity, overlay, impact }) {
+  const unknown = { status: 'unverified', overlay };
+  if (!metaIdentity || !videoIdentity || impact?.jobId !== jobId || impact?.timingRevision !== 3
+      || !/^[a-f0-9]{64}$/.test(impact?.videoSha256 ?? '')) return unknown;
+  const safePath = resolveMetaPath(metaPath, jobId);
+  if (!safePath) return unknown;
+  try {
+    const before = await fs.promises.lstat(safePath);
+    if (!before.isFile() || before.size > 32 * 1024 * 1024 || !matchesVideoIdentity(metaIdentity, before)) return unknown;
+    const metadata = JSON.parse(await fs.promises.readFile(safePath, 'utf8'));
+    const after = await fs.promises.lstat(safePath);
+    const video = await fs.promises.stat(inputPath);
+    if (!matchesVideoIdentity(metaIdentity, after) || !matchesVideoIdentity(videoIdentity, video)) return unknown;
+    const marked = markSourceFrameGaps(overlay, metadata?.frames, impact.frameTimesMs);
+    return marked.verified ? { status: 'verified', missingFrames: marked.missingFrames, overlay: marked.overlay } : unknown;
+  } catch { return unknown; }
+}
+
 async function debugSourceTimeline(jobId, videoPath, frames, signal) {
   let times = null;
   const cached = impactReviews.read(jobId);
@@ -2125,6 +2199,12 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false, refresh = false 
       updateRun({ status: 'failed', error: 'DTL V2 meta generation failed' });
       return;
     }
+    let metaIdentity = null;
+    try {
+      const resolvedMeta = resolveMetaPath(generated.metaPath, jobId);
+      const stat = resolvedMeta && fs.lstatSync(resolvedMeta);
+      if (stat?.isFile()) metaIdentity = stat;
+    } catch { /* An unverified timeline remains usable only with a warning. */ }
     let impact = null;
     try {
       impact = await scheduleAutomaticImpact(jobId, inputPath, hasBody ? bodyPath : null);
@@ -2145,6 +2225,15 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false, refresh = false 
       return;
     }
     const sidecar = summarizeDtlClubPointsV2(result, generated.metaPath, generated.durationMs);
+    const coverage = await verifyClubSourceCoverage({ jobId, metaPath: generated.metaPath, metaIdentity,
+      inputPath, videoIdentity, overlay: sidecar.overlay, impact });
+    sidecar.sourceFrameCoverage = { status: coverage.status,
+      ...(coverage.status === 'verified' ? { missingFrames: coverage.missingFrames } : {}) };
+    if (coverage.status === 'verified') {
+      sidecar.overlayVideoSha256 = impact.videoSha256;
+      sidecar.pendingOverlay = coverage.overlay;
+      sidecar.overlay = null;
+    }
     if (!impact) {
       sidecar.overlayVideoSha256 = await hashVideoFile(inputPath);
       sidecar.pendingOverlay = sidecar.overlay;
@@ -2152,12 +2241,17 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false, refresh = false 
       sidecar.observations = { status: 'withheld', revision: 1, automaticCoachingReady: false,
         reason: 'IMPACT_CANDIDATE_UNAVAILABLE', levels: [] };
     }
+    if (metaIdentity) {
+      const metaPath = resolveMetaPath(generated.metaPath, jobId);
+      if (!metaPath || !matchesVideoIdentity(metaIdentity, fs.lstatSync(metaPath))) {
+        throw new Error('Club metadata changed during analysis');
+      }
+    }
     const updated = readAnalysisCache(jobId);
-    const guarded = refresh || !impact;
-    const updatedShot = guarded ? shotStore.getShotByJobId(jobId) : null;
+    const updatedShot = shotStore.getShotByJobId(jobId);
     const updatedInputPath = updatedShot?.metadata?.analysisInput?.path || updatedShot?.media?.path;
-    const updatedBodyPath = guarded ? updated?.progress?.bodyPath || updatedShot?.metadata?.bodyPath || bodyArtifactPath(jobId) : null;
-    if (guarded && (!updated || updated.status !== 'done' || (refresh && updated.dtlClubRefresh?.id !== refreshId)
+    const updatedBodyPath = updated?.progress?.bodyPath || updatedShot?.metadata?.bodyPath || bodyArtifactPath(jobId);
+    if (!updated || updated.status !== 'done' || (refresh && updated.dtlClubRefresh?.id !== refreshId)
       || !updatedInputPath || path.resolve(updatedInputPath) !== path.resolve(shotInputPath)
       || !updatedBodyPath || path.resolve(updatedBodyPath) !== path.resolve(bodyPath)
       || updatedShot?.metadata?.viewpoint !== shot?.metadata?.viewpoint
@@ -2167,8 +2261,8 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false, refresh = false 
       || !matchesVideoIdentity(videoIdentity, fs.statSync(inputPath))
       || fs.existsSync(bodyPath) !== hasBody
       || (bodyIdentity && !matchesVideoIdentity(bodyIdentity, fs.statSync(bodyPath)))
-      || sidecar.status !== 'succeeded')) {
-      throw new Error('Saved input or analysis changed during club refresh');
+      || sidecar.status !== 'succeeded') {
+      throw new Error('Saved input or analysis changed during club analysis');
     }
     const analysis = updated?.analysis && typeof updated.analysis === 'object' ? { ...updated.analysis } : null;
     const takeawayMs = sidecar.takeaway.timeMs;

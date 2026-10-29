@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { readFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
 import cacheModule from "../store/impactReviewCache.js";
@@ -28,6 +30,87 @@ assert.equal(mapFrames([{ sourceTimeMs: 1 }], [0, 2]), null, "Equidistant source
 assert.equal(mapFrames([{ sourceTimeMs: 0 }, { sourceTimeMs: 0 }], [0, 16]), null, "Duplicate inference timestamps are invalid.");
 assert.equal(mapFrames([{ sourceTimeMs: 0 }, {}], [0, 16]), null, "Missing inference timestamps are not verified.");
 assert.equal(mapFrames([{ sourceTimeMs: 0 }], [0, 0]), null, "Duplicate video timestamps are invalid.");
+
+const markGaps = context.markSourceFrameGaps;
+assert.equal(typeof markGaps, 'function', 'source-frame coverage must be checked before marking a trail');
+const videoTimes = [0, 16.667, 33.333, 50, 66.667, 83.333];
+const meta = [0, 16.667, 50, 66.667].map((sourceTimeMs, frame) => ({ sourceTimeMs, frame }));
+const seen = { x: .2, y: .4, confidence: .9 };
+const overlay = { clubTimeSource: 'video_pts', clubFrames: meta.map(({ sourceTimeMs, frame }) => ({
+  timeMs: Math.round(sourceTimeMs), frame, head: seen, handle: seen,
+})) };
+const snapshot = JSON.stringify({ meta, overlay, videoTimes });
+const marked = markGaps(overlay, meta, videoTimes);
+assert.equal(marked.verified, true);
+assert.equal(marked.missingFrames, 2);
+assert.equal(marked.overlay.clubFrames[1].timeMs, 16.667, 'display timestamps must use the actual video frame clock');
+assert.equal(marked.overlay.clubFrames[1].headValidUntilMs, 33.333);
+assert.equal(marked.overlay.clubFrames[1].handleValidUntilMs, 33.333);
+assert.equal(marked.overlay.clubFrames[2].headBreakBefore, true);
+assert.equal(marked.overlay.clubFrames[2].handleBreakBefore, true);
+assert.equal(marked.overlay.clubFrames.at(-1).headValidUntilMs, 83.333);
+assert.equal(JSON.stringify({ meta, overlay, videoTimes }), snapshot, 'inputs and original cached observations must not be modified');
+
+const implicitMeta = meta.map(({ sourceTimeMs }, i) => i % 2 ? { sourceTimeMs, frame: null } : { sourceTimeMs });
+const implicit = markGaps(overlay, implicitMeta, videoTimes);
+assert.equal(implicit.verified, true, 'camera metadata may omit frame numbers');
+assert.equal(implicit.missingFrames, 2);
+assert.equal(implicit.overlay.clubFrames[1].headValidUntilMs, 33.333);
+assert.equal(implicit.overlay.clubFrames[2].timeMs, 50, 'metadata row numbers must not replace the source video clock');
+assert.equal(implicit.overlay.clubFrames[2].headBreakBefore, true);
+
+const sampled = { ...overlay, clubFrames: [overlay.clubFrames[0], ...overlay.clubFrames.slice(2)] };
+const markedSampled = markGaps(sampled, meta, videoTimes);
+assert.equal(markedSampled.overlay.clubFrames[0].headValidUntilMs, 33.333, 'sampling must not hide a missing frame');
+assert.equal(markedSampled.overlay.clubFrames[1].headBreakBefore, true);
+const completeMeta = videoTimes.map((sourceTimeMs, frame) => ({ sourceTimeMs, frame }));
+const completeSample = { clubTimeSource: 'video_pts', clubFrames: [0, 3, 5].map(frame => ({
+  frame, timeMs: Math.round(videoTimes[frame]), head: seen, handle: seen,
+})) };
+const complete = markGaps(completeSample, completeMeta, videoTimes);
+assert.equal(complete.verified, true);
+assert.equal(complete.missingFrames, 0);
+assert.equal(complete.overlay.clubFrames[1].timeMs,videoTimes[3]);
+assert.equal(complete.overlay.clubFrames[2].timeMs,videoTimes[5]);
+assert.equal(complete.overlay.clubFrames.some(row=>row.headBreakBefore||row.handleBreakBefore),false,'intentional sampling is not a source gap');
+const prior = structuredClone(overlay);
+prior.clubFrames[0].headValidUntilMs = 16.667;
+assert.equal(markGaps(prior, meta, videoTimes).overlay.clubFrames[0].headValidUntilMs, 16.667, 'an earlier known detector gap wins');
+for (const [badOverlay, badMeta, badClock] of [
+  [overlay, meta.map((row, i) => i === 1 ? { ...row, sourceTimeMs: null } : row), videoTimes],
+  [overlay, meta, [0, 16.667, 16.667, 50]],
+  [overlay, meta, [0, 1, 33.333, 50, 66.667]],
+  [{ ...overlay, clubFrames: overlay.clubFrames.map((row, i) => i === 1 ? { ...row, frame: 99 } : row) }, meta, videoTimes],
+  [{ ...overlay, clubTimeSource: undefined }, meta, videoTimes],
+  [{ ...overlay, clubFrames: overlay.clubFrames.map((row,i)=>i===1?{...row,headValidUntilMs:20}:row) }, meta, videoTimes],
+]) {
+  assert.equal(markGaps(badOverlay, badMeta, badClock).verified, false, 'unverified source frames must not be labelled as verified');
+}
+
+{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'club-source-coverage-'));
+  try {
+    const metaPath=path.join(dir,'meta.json'), inputPath=path.join(dir,'video.mp4');
+    fs.writeFileSync(metaPath,JSON.stringify({frames:meta})); fs.writeFileSync(inputPath,'video fixture');
+    const metaIdentity=fs.lstatSync(metaPath), videoIdentity=fs.statSync(inputPath);
+    Object.assign(context,{fs,resolveMetaPath:p=>p===metaPath?p:null,matchesVideoIdentity:cacheModule.matchesVideoIdentity});
+    const args={jobId:'job',metaPath,metaIdentity,inputPath,videoIdentity,overlay,
+      impact:{jobId:'job',timingRevision:3,videoSha256:'a'.repeat(64),frameTimesMs:videoTimes}};
+    const result=await context.verifyClubSourceCoverage(args);
+    assert.equal(result.status,'verified');assert.equal(result.missingFrames,2);
+    assert.equal(result.overlay.clubFrames[1].headValidUntilMs,33.333);
+    assert.equal((await context.verifyClubSourceCoverage({...args,impact:{...args.impact,jobId:'other'}})).status,'unverified');
+    assert.equal((await context.verifyClubSourceCoverage({...args,metaPath:'/outside'})).status,'unverified');
+    fs.appendFileSync(inputPath,' changed');
+    assert.equal((await context.verifyClubSourceCoverage(args)).status,'unverified','a changed video must not reuse its source clock');
+    args.videoIdentity=fs.statSync(inputPath);
+    fs.appendFileSync(metaPath,' ');
+    assert.equal((await context.verifyClubSourceCoverage(args)).status,'unverified','changed metadata must not be marked verified');
+    const link=path.join(dir,'link.json');fs.symlinkSync(metaPath,link);
+    context.resolveMetaPath=p=>p===link?p:null;
+    assert.equal((await context.verifyClubSourceCoverage({...args,metaPath:link,metaIdentity:fs.lstatSync(link)})).status,'unverified','metadata symlinks are not accepted');
+  } finally { fs.rmSync(dir,{recursive:true,force:true}); }
+}
 
 let probeCalls = 0;
 Object.assign(context, {

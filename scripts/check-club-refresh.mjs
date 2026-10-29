@@ -57,16 +57,21 @@ function harness() {
   const started = new Promise(resolve => { entered = resolve; });
   const gate = new Promise(resolve => { release = resolve; });
   const files = new Map([['/video.mp4', { ...identity }], ['/body.json', { ...identity, ino: 2 }]]);
-  const calls = { meta: [], sidecar: [], archives: 0, failMeta: false, failArchive: false, failImpact: false, failBody: false };
+  const metadataIdentity = { ...identity, ino: 3 };
+  const calls = { meta: [], sidecar: [], archives: 0, failMeta: false, failArchive: false, failImpact: false, failBody: false, verifiedCoverage: false };
   const context = vm.createContext({
     console, Date, path, randomUUID, matchesVideoIdentity, DTL_V2_TAKEAWAY_PROFILE: 'test', DTL_V2_STALE_RUNNING_MS: 1000,
-    fs: { existsSync: file => files.has(file), statSync: file => { if (!files.has(file)) throw new Error('missing file'); return { ...files.get(file) }; } },
+    fs: { existsSync: file => files.has(file), statSync: file => { if (!files.has(file)) throw new Error('missing file'); return { ...files.get(file) }; },
+      lstatSync: () => ({ ...metadataIdentity, isFile: () => true }) },
     readAnalysisCache: () => cache && structuredClone(cache),
     writeAnalysisCache: (_jobId, value) => { cache = structuredClone(value); return structuredClone(cache); },
     shotStore: { getShotByJobId: () => shot && structuredClone(shot) }, bodyArtifactPath: () => '/body.json',
+    resolveMetaPath: value => value,
     getVideoMeta: async () => ({ durationMs: 1000 }),
     requestDtlClubPointsV2MetaGeneration: async args => { calls.meta.push(args); entered(); await gate; return calls.failMeta ? null : { metaPath: `/tmp/${args.metadataJobId}.meta.json`, durationMs: 20 }; },
-    scheduleAutomaticImpact: async () => { if (calls.failImpact) throw new Error('impact unavailable'); return { candidate: { timeMs: 100 } }; },
+    scheduleAutomaticImpact: async () => { if (calls.failImpact) throw new Error('impact unavailable'); return { candidate: { timeMs: 100 }, videoSha256: 'a'.repeat(64) }; },
+    verifyClubSourceCoverage: async ({overlay}) => { calls.onCoverage?.(); return calls.verifiedCoverage
+      ? { status: 'verified', missingFrames: 1, overlay } : { status: 'unverified', overlay }; },
     hashVideoFile: async () => { calls.onHash?.(); return 'a'.repeat(64); },
     requestDtlClubPointsV2SidecarAnalysis: async args => { calls.sidecar.push(args); if(calls.failBody)throw Object.assign(new Error('missing pose'),{code:'BODY_UNAVAILABLE'}); return { ok: true, status: 'done', events: { takeawayMs: 20 },
       eventValidation: { eventQuality: { takeaway: { status: 'confirmed' } } },
@@ -75,7 +80,7 @@ function harness() {
     updateNasArchiveStatus: (_jobId, patch) => { cache.nasArchive = patch; },
   });
   vm.runInContext('let dtlClubPointsV2Tail = Promise.resolve(); const activeDtlClubPointsV2 = new Map();\n' + code, context);
-  return { context, started, release, files, calls, get cache() { return cache; }, set cache(value) { cache = value; },
+  return { context, started, release, files, calls, metadataIdentity, get cache() { return cache; }, set cache(value) { cache = value; },
     get shot() { return shot; }, set shot(value) { shot = value; }, settle: () => vm.runInContext('dtlClubPointsV2Tail', context) };
 }
 
@@ -230,5 +235,48 @@ for (const refresh of [false, true]) {
   assert.equal(h.cache.dtlClubRefresh.status, 'failed', 'do not save a trajectory when its source changed');
   assert.equal(h.cache.dtlClubPointsV2.status, 'failed');
   assert.equal(h.calls.archives, 0);
+}
+
+{
+  const h = harness();
+  h.cache.dtlClubPointsV2 = {status:'failed'}; h.cache.analysis.debug.dtlClubPointsV2 = null;
+  h.calls.verifiedCoverage = true;
+  h.context.scheduleDtlClubPointsV2Sidecar('job');
+  await h.started; h.release(); await h.settle();
+  assert.equal(h.cache.dtlClubPointsV2.sourceFrameCoverage.status,'verified');
+  assert.equal(h.cache.dtlClubPointsV2.sourceFrameCoverage.missingFrames,1);
+  assert.equal(h.cache.dtlClubPointsV2.overlay,null);
+  assert.equal(h.cache.dtlClubPointsV2.overlayVideoSha256,'a'.repeat(64));
+  assert.equal(h.cache.dtlClubPointsV2.pendingOverlay.clubTimeSource,'video_pts');
+}
+
+{
+  const h = harness();
+  h.cache.dtlClubPointsV2 = {status:'failed'}; h.cache.analysis.debug.dtlClubPointsV2 = null;
+  h.calls.verifiedCoverage = true;
+  h.calls.onCoverage = () => { h.files.get('/video.mp4').ctimeMs++; };
+  h.context.scheduleDtlClubPointsV2Sidecar('job');
+  await h.started; h.release(); await h.settle();
+  assert.equal(h.cache.dtlClubPointsV2.status,'failed','verified coverage must not be saved if its video changed');
+  assert.equal(h.calls.archives,0);
+}
+{
+  const h = harness();
+  h.cache.dtlClubPointsV2 = {status:'failed'}; h.cache.analysis.debug.dtlClubPointsV2 = null;
+  h.calls.verifiedCoverage = true;
+  h.calls.onCoverage = () => { h.metadataIdentity.ctimeMs++; };
+  h.context.scheduleDtlClubPointsV2Sidecar('job');
+  await h.started; h.release(); await h.settle();
+  assert.equal(h.cache.dtlClubPointsV2.status,'failed','verified coverage must not be saved if metadata changed');
+  assert.equal(h.calls.archives,0);
+}
+for (const changed of ['video','metadata']) {
+  const h = harness();
+  h.cache.dtlClubPointsV2 = {status:'failed'}; h.cache.analysis.debug.dtlClubPointsV2 = null;
+  h.calls.onCoverage = () => { if(changed==='video')h.files.get('/video.mp4').ctimeMs++;else h.metadataIdentity.ctimeMs++; };
+  h.context.scheduleDtlClubPointsV2Sidecar('job');
+  await h.started; h.release(); await h.settle();
+  assert.equal(h.cache.dtlClubPointsV2.status,'failed',`unverified coverage cannot save a changed ${changed}`);
+  assert.equal(h.calls.archives,0);
 }
 console.log('club refresh preserves prior data, checks inputs and handles failures');
