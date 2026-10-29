@@ -127,7 +127,7 @@ const storage = multer.diskStorage({
     cb(null, `${Date.now()}-${randomUUID()}-${file.originalname}`),
 });
 
-const upload = multer({ storage });
+const upload = multer({ storage, limits: { fields: 64, fieldNestingDepth: 4, fieldArrayIndexLimit: 1024 } });
 app.use(express.json());
 
 // Simple CORS (allow configurable origin, default all)
@@ -702,7 +702,7 @@ function readAnalysisCache(jobId) {
 }
 
 function isSafeJobId(jobId) {
-  return typeof jobId === 'string' && jobId.length > 0 && !jobId.includes('/') && !jobId.includes('\\');
+  return typeof jobId === 'string' && jobId.length > 0 && jobId !== '.' && jobId !== '..' && !jobId.includes('/') && !jobId.includes('\\');
 }
 
 function localThumbnailUrl(jobId) {
@@ -4667,6 +4667,7 @@ app.delete('/api/files/:name', async (req, res) => {
   try {
     const shot = shotStore.getShotByMediaName(req.params.name);
     const jobId = shot?.jobId || path.basename(req.params.name, path.extname(req.params.name));
+    if (!isSafeJobId(jobId)) return res.status(400).json({ ok: false, message: 'Invalid jobId' });
     const cache = readAnalysisCache(jobId);
     if (nasArchive.enabled) await nasArchive.deleteJob(jobId);
     await fs.promises.unlink(target);
@@ -4704,6 +4705,7 @@ app.get(/.*/, (_req, res) => {
 // Global error handler to ensure JSON error responses
 // eslint-disable-next-line no-unused-vars
 app.use((err, _req, res, _next) => {
+  if (err instanceof multer.MulterError) return res.status(400).json({ ok: false, message: '업로드 항목을 확인해 주세요.' });
   console.error(err);
   res.status(500).json({ ok: false, message: 'Server error' });
 });

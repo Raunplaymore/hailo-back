@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
-import {mkdtemp, mkdir, readFile, rm, symlink, writeFile} from 'node:fs/promises';
+import {mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile} from 'node:fs/promises';
 import http from 'node:http';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
+import {gzipSync} from 'node:zlib';
 
 const root = await mkdtemp(path.join(tmpdir(), 'hailo-upload-status-'));
 const appDir = path.join(root, 'app');
@@ -68,12 +69,41 @@ try {
     if (backend.exitCode !== null) throw new Error(`isolated backend exited: ${logs}`);
     try { return (await fetch(`${base}/api/files`)).ok; } catch { return false; }
   });
+  const invalidForms = ['cameraConfig[a][b][c][d][e]', 'cameraConfig[999999]'].map(field => {
+    const invalid = new FormData();
+    invalid.append('video', new Blob(['fixture'], {type: 'video/mp4'}), 'invalid.mp4');
+    invalid.append(field, 'value');
+    return invalid;
+  });
+  const tooManyFields = new FormData();
+  tooManyFields.append('video', new Blob(['fixture'], {type: 'video/mp4'}), 'invalid.mp4');
+  for (let i = 0; i < 65; i++) tooManyFields.append(`field${i}`, 'value');
+  invalidForms.push(tooManyFields);
+  for (const invalid of invalidForms) {
+    assert.equal((await fetch(`${base}/api/analyze`, {method: 'POST', body: invalid})).status, 400);
+    assert.deepEqual(await readdir(path.join(root, 'uploads')), [], 'rejected upload must not leave a partial video');
+    assert.equal((await fetch(`${base}/api/files`)).status, 200, 'backend must continue serving after an invalid form');
+  }
+  const compressed = Buffer.concat([gzipSync(Buffer.from('{}')), Buffer.from([0]), Buffer.alloc(100 * 1024, 0x58)]);
+  await new Promise((resolve, reject) => {
+    const request = http.request(`${base}/__json_parser_check`, {method: 'POST', headers: {
+      'Content-Type': 'application/json', 'Content-Encoding': 'gzip', 'Content-Length': compressed.length,
+    }}, response => { response.resume(); response.on('end', resolve); });
+    request.on('error', reject);
+    request.end(compressed);
+  });
+  await new Promise(resolve => setTimeout(resolve, 250));
+  assert.equal(backend.exitCode, null, 'compressed JSON with trailing bytes must not stop the backend');
+  assert.equal((await fetch(`${base}/api/files`)).status, 200);
   const form = new FormData();
   form.append('video', new Blob(['fixture'], {type: 'video/mp4'}), 'test.mp4');
+  form.append('cameraConfig[lens]', 'wide');
   const upload = await fetch(`${base}/api/analyze`, {method: 'POST', body: form});
   assert.equal(upload.status, 200);
   const {jobId} = await upload.json();
   assert.ok(jobId);
+  const saved = JSON.parse(await readFile(path.join(dataDir, 'shots.json'), 'utf8')).shots.find(shot => shot.jobId === jobId);
+  assert.equal(saved.metadata.cameraConfig.lens, 'wide', 'ordinary nested camera metadata remains accepted');
   let bodyTimeout;
   try {
     await Promise.race([bodyStarted, new Promise((_, reject) => { bodyTimeout = setTimeout(() => reject(new Error('body request not started')), 10000); })]);
