@@ -2565,7 +2565,11 @@ function queueUploadedShotAnalysis(file, body) {
     analyzeAndStoreUploadedShot(file, body)
       .catch((err) => {
         console.error('queued upload analysis failed', err);
-        markQueuedUploadShotFailed(file, err.message || 'Analysis failed');
+        try {
+          markQueuedUploadShotFailed(file, err.message || 'Analysis failed');
+        } catch (storeError) {
+          console.error('could not persist failed upload status', storeError);
+        }
       })
       .finally(() => activeUploadJobs.delete(queuedShot.jobId));
   });

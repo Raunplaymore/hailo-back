@@ -15,13 +15,44 @@ function loadStore() {
   try {
     const raw = fs.readFileSync(storePath, 'utf8');
     return JSON.parse(raw);
-  } catch {
-    return { sessions: [], shots: [] };
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    try { fs.lstatSync(storePath); } catch (statError) {
+      if (statError.code === 'ENOENT') return { sessions: [], shots: [] };
+      throw statError;
+    }
+    throw error;
   }
 }
 
 function saveStore(store) {
-  fs.writeFileSync(storePath, JSON.stringify(store, null, 2), 'utf8');
+  let target = storePath;
+  let mode;
+  try {
+    const previous = fs.statSync(storePath);
+    fs.accessSync(storePath, fs.constants.W_OK);
+    mode = previous.mode & 0o7777;
+    target = fs.realpathSync(storePath);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    let missing = false;
+    try { fs.lstatSync(storePath); } catch (statError) {
+      if (statError.code !== 'ENOENT') throw statError;
+      missing = true;
+    }
+    if (!missing) throw error;
+    mode = undefined;
+  }
+  const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(store, null, 2), { encoding: 'utf8', flag: 'wx', mode: mode ?? 0o666 });
+    if (mode !== undefined) fs.chmodSync(temporary, mode);
+    // shortcut: atomic replacement does not serialize multiple writers; add locking before enabling them.
+    fs.renameSync(temporary, target);
+  } catch (error) {
+    try { fs.unlinkSync(temporary); } catch (cleanupError) { if (cleanupError.code !== 'ENOENT') console.warn('Could not clean temporary shot store:', cleanupError.message); }
+    throw error;
+  }
 }
 
 function ensureSession(store, sessionId, name, meta = {}) {
