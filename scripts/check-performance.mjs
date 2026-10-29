@@ -8,7 +8,7 @@ const result = {status: 'succeeded', analysisVersion: 'current', events: {impact
 let cache = {status: 'done', analysis: result, progress: {stage: 'fusion_succeeded'}, dtlClubPointsV2: {status: 'succeeded'}, nasArchive: {state: 'stored'}};
 let writes = 0, inferCalls = 0, schedules = 0;
 const context = {
-  console, Date, process, path,
+  console, Date, process, path, activeUploadJobs: new Set(),
   fs: {existsSync: () => false},
   readAnalysisCache: () => cache,
   hasFreshInferAnalysis: c => c.analysis?.analysisVersion === 'current',

@@ -12,6 +12,7 @@ vm.runInNewContext(route,{
  app:{post:(_path,fn)=>handler=fn}, fs:{existsSync:()=>true,statSync:()=>({dev:1,ino:7,size:fileSize,mtimeMs:20,ctimeMs:fileChange})}, matchesVideoIdentity:cacheModule.matchesVideoIdentity,
  shotStore:{getShotByJobId:id=>id==='known'?shot:null},
  impactReviews:{read:()=>({inputPath:'/uploads/converted.mp4',dev:1,ino:7,size:100,mtimeMs:20,ctimeMs:40,result:{timingRevision,videoSha256:'a'.repeat(64),frameTimesMs:frameTimes,candidate:{timeMs:550}}})},
+ resolveReviewReference:()=>({inputPath:'/uploads/converted.mp4',dev:1,ino:7,size:100,mtimeMs:20,ctimeMs:40,result:{timingRevision,videoSha256:'a'.repeat(64),frameTimesMs:frameTimes,candidate:{timeMs:550}}}),
  readAnalysisCache:()=>analysisCache,
  bodyArtifactPath:id=>`/data/body/${id}.json`,inferUrl:p=>p,
  inferFetchJson:async(url,options)=>{calls.push({url,...options});if(changeDuringInference)fileChange=41;return upstream;},

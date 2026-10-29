@@ -31,6 +31,7 @@ vm.runInNewContext(route, {
     return input === file ? copy : otherCopy;
   },
   impactReviews: { read: (id) => id === 'known' ? { inputPath: file, dev: identity.dev, ino: identity.ino, size: identity.size, mtimeMs: identity.mtimeMs, ctimeMs: identity.ctimeMs, result: { videoSha256: hash, frameTimesMs: frames } } : null },
+  resolveReviewReference: (id, value) => id === 'known' && value === hash ? { inputPath: file, dev: identity.dev, ino: identity.ino, size: identity.size, mtimeMs: identity.mtimeMs, ctimeMs: identity.ctimeMs, result: { videoSha256: hash, frameTimesMs: frames } } : null,
   shotStore: { getShotByJobId: (id) => id === 'known' ? { metadata: { analysisInput: { path: other } } } : null },
 });
 const server = app.listen(0, '127.0.0.1');

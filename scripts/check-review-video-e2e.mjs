@@ -43,6 +43,7 @@ try {
   const route = source.slice(source.indexOf("app.get('/api/analyze/:jobId/review-video'"), source.indexOf("app.post('/api/analyze/:jobId/club-review'"));
   assert.ok(route.startsWith("app.get('/api/analyze/:jobId/review-video'"));
   vm.runInNewContext(route,{app,fs,path,impactReviews,reviewVideoPath,matchesVideoIdentity,
+    resolveReviewReference:(id,hash)=>{const entry=impactReviews.read(id);return entry?.result?.videoSha256===hash?entry:null;},
     shotStore:{getShotByJobId:id=>id==='known'?{metadata:{analysisInput:{path:video}}}:null}});
   server=app.listen(0,'127.0.0.1');await new Promise(resolve=>server.once('listening',resolve));
   const url=`http://127.0.0.1:${server.address().port}/api/analyze/known/review-video?v=${digest}`;

@@ -19,6 +19,7 @@ const {
 const { createNasArchive } = require('./storage/nasArchive');
 const { createReviewVideo } = require('./storage/reviewVideo');
 const { createImpactReviewCache, matchesVideoIdentity } = require('./store/impactReviewCache');
+const { createVideoClock, selectVideoReference } = require('./store/videoClock');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -2461,13 +2462,18 @@ function markQueuedUploadShotFailed(file, errorMessage) {
   });
 }
 
+const activeUploadJobs = new Set();
+
 function queueUploadedShotAnalysis(file, body) {
   const queuedShot = buildQueuedUploadShot(file, body);
+  activeUploadJobs.add(queuedShot.jobId);
   setImmediate(() => {
-    analyzeAndStoreUploadedShot(file, body).catch((err) => {
-      console.error('queued upload analysis failed', err);
-      markQueuedUploadShotFailed(file, err.message || 'Analysis failed');
-    });
+    analyzeAndStoreUploadedShot(file, body)
+      .catch((err) => {
+        console.error('queued upload analysis failed', err);
+        markQueuedUploadShotFailed(file, err.message || 'Analysis failed');
+      })
+      .finally(() => activeUploadJobs.delete(queuedShot.jobId));
   });
   return queuedShot;
 }
@@ -3303,6 +3309,7 @@ async function fetchInferJobPayload(jobId, { includeResult } = {}) {
     const analysis = await hydrateOverlayFromBodyArtifact(cached.analysis, cached.progress?.bodyPath || bodyArtifactPath(jobId));
     return { status: 'done', analysis, progress: cached.progress || null };
   }
+  if (!cached && activeUploadJobs.has(jobId)) return { notFound: true };
   const persist = (patch) => writeAnalysisCache(jobId, { ...readAnalysisCache(jobId), ...patch });
   const shot = shotStore.getShotByJobId(jobId);
   const shotProgress = shot?.progress || null;
@@ -3561,15 +3568,75 @@ async function respondJobResult(req, res) {
   return res.status(404).json({ ok: false, message: 'Job not found' });
 }
 
+const manualVideoClocks = createVideoClock({
+  hash: hashVideoFile,
+  probe: async (inputPath) => {
+    const { ffprobe } = await ensureFfmpegAvailability();
+    if (!ffprobe) throw new Error('Video clock probe unavailable');
+    // Cap packets so unsupported long videos cannot consume unbounded memory.
+    const { stdout } = await runCommand('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
+      '-read_intervals', '%+#7201', '-show_frames', '-show_streams',
+      '-show_entries', 'frame=best_effort_timestamp_time:stream=nb_frames', '-of', 'json', inputPath], { timeoutMs: 30_000 });
+    const data = JSON.parse(stdout);
+    const raw = data.frames.map(frame => typeof frame.best_effort_timestamp_time === 'string'
+      && frame.best_effort_timestamp_time.trim() ? Number(frame.best_effort_timestamp_time) * 1000 : NaN);
+    return { times: raw.map(t => Math.round((t - raw[0]) * 1000) / 1000), frameCount: Number(data.streams?.[0]?.nb_frames) };
+  },
+});
+function resolveReviewReference(jobId, videoSha256, { requireRevision3 = false, allowManual = false } = {}) {
+  const shot = shotStore.getShotByJobId(jobId);
+  if (!shot) return null;
+  let impact = impactReviews.read(jobId);
+  let manual = allowManual ? manualVideoClocks.read(jobId, videoSha256) : null;
+  try {
+    if (manual && fs.realpathSync(shot.metadata?.analysisInput?.path || shot.media?.path) !== manual.inputPath) manual = null;
+  } catch { manual = null; }
+  try {
+    if (impact && shot.metadata?.analysisInput?.path && fs.realpathSync(shot.metadata.analysisInput.path) !== fs.realpathSync(impact.inputPath)) impact = null;
+  } catch { impact = null; }
+  return selectVideoReference(impact, manual, videoSha256, { requireRevision3 });
+}
+
+app.get('/api/analyze/:jobId/video-clock', async (req, res) => {
+  const { jobId } = req.params;
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) return res.sendStatus(400);
+  const shot = shotStore.getShotByJobId(jobId);
+  if (!shot) return res.status(404).json({ ok: false, error: '저장된 영상을 찾을 수 없습니다.' });
+  if (shot.metadata?.viewpoint === 'face_on' || shot.metadata?.handedness === 'left') {
+    return res.status(422).json({ ok: false, error: '현재 수동 골반 확인은 오른손 후방 영상만 지원합니다.' });
+  }
+  const status = readAnalysisCache(jobId)?.status || shot.status;
+  if (['pending', 'queued', 'running', 'uploading'].includes(status)) {
+    return res.status(409).json({ ok: false, error: '영상 준비가 끝난 뒤 다시 시도해 주세요.' });
+  }
+  const input = shot.metadata?.analysisInput?.path || shot.media?.path;
+  try {
+    const source = fs.realpathSync(input);
+    const roots = [uploadDir, dataDir].map(root => fs.realpathSync(root));
+    if (!roots.some(root => source.startsWith(`${root}${path.sep}`))) return res.sendStatus(403);
+    const result = await manualVideoClocks.prepare(jobId, source);
+    const current = shotStore.getShotByJobId(jobId);
+    if (!current || fs.realpathSync(current.metadata?.analysisInput?.path || current.media?.path) !== source) {
+      return res.status(409).json({ ok: false, error: '기록의 영상이 변경됐습니다. 다시 확인해 주세요.' });
+    }
+    return res.json(result);
+  } catch (error) {
+    return res.status(error.message === 'Video clock is busy' ? 503 : 422)
+      .json({ ok: false, error: '영상의 프레임 시각을 확인하지 못했습니다. 다시 시도해 주세요.' });
+  }
+});
+
 app.get('/api/analyze/:jobId/review-video', async (req, res) => {
   const { jobId } = req.params;
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) return res.sendStatus(400);
-  const cached = impactReviews.read(jobId);
+  const shot = shotStore.getShotByJobId(jobId);
+  if (!shot) return res.sendStatus(404);
   const bound = req.query.v !== undefined;
+  const cached = bound && typeof req.query.v === 'string'
+    ? resolveReviewReference(jobId, req.query.v, { allowManual: true }) : null;
   if (bound && (typeof req.query.v !== 'string' || !/^[a-f0-9]{64}$/.test(req.query.v)
       || cached?.result?.videoSha256 !== req.query.v || !Array.isArray(cached.result.frameTimesMs)
       || cached.result.frameTimesMs.length < 4)) return res.sendStatus(409);
-  const shot = shotStore.getShotByJobId(jobId);
   const inputPath = bound ? cached?.inputPath : shot?.metadata?.analysisInput?.path || shot?.media?.path;
   if (!inputPath || !fs.existsSync(inputPath)) return res.sendStatus(bound ? 409 : 404);
   const stillMatches = async () => matchesVideoIdentity(cached, await fs.promises.stat(inputPath).catch(() => null));
@@ -3653,7 +3720,7 @@ app.get('/api/analyze/:jobId/pose-overlay', async (req, res) => {
   if (!shot) return res.status(404).json({ ok: false, error: '저장된 영상을 찾을 수 없습니다.' });
   const status = readAnalysisCache(jobId)?.status || shot.status;
   if (['pending', 'queued', 'running'].includes(status)) return res.status(409).json({ ok: false, error: '영상 분석이 끝난 뒤 다시 시도해 주세요.' });
-  const cached = impactReviews.read(jobId);
+  const cached = resolveReviewReference(jobId, videoSha256, { requireRevision3: true, allowManual: true });
   const times = cached?.result?.frameTimesMs;
   if (cached?.result?.videoSha256 !== videoSha256 || cached?.result?.timingRevision !== 3
       || !Array.isArray(times) || times.length < 4 || times.length > 7200
@@ -3708,8 +3775,9 @@ app.post('/api/analyze/:jobId/practice-review', async (req, res) => {
   // Completed analysis reads can leave the capture record's status behind.
   const analysisStatus = readAnalysisCache(jobId)?.status || shot.status;
   if (['pending', 'queued', 'running'].includes(analysisStatus)) return res.status(409).json({ ok: false, error: '영상 분석이 끝난 뒤 다시 시도해 주세요.' });
-  if (shot.metadata?.viewpoint === 'face_on') return res.status(422).json({ ok: false, error: '이 자세 비교는 DTL 영상만 지원합니다.' });
-  const cached = videoSha256 ? impactReviews.read(jobId) : null;
+  if (shot.metadata?.viewpoint === 'face_on' || (coaching && shot.metadata?.handedness === 'left')) return res.status(422).json({ ok: false, error: '이 골반 확인은 오른손 DTL 영상만 지원합니다.' });
+  const cached = videoSha256 ? resolveReviewReference(jobId, videoSha256,
+    { requireRevision3: true, allowManual: coaching && impactFrameIndex !== undefined }) : null;
   if (videoSha256 && (cached?.result?.videoSha256 !== videoSha256 || cached?.result?.timingRevision !== 3)) {
     return res.status(409).json({ ok: false, error: '영상이 변경됐습니다. 새로고침 후 장면을 다시 선택해 주세요.' });
   }

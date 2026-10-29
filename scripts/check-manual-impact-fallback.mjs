@@ -1,0 +1,80 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import vm from 'node:vm';
+import {createRequire} from 'node:module';
+const require=createRequire(import.meta.url), express=require('express');
+const {createVideoClock,selectVideoReference}=require('../store/videoClock.js');
+const {matchesVideoIdentity}=require('../store/impactReviewCache.js');
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'manual-impact-'));
+const video=path.join(root,'video.mp4'),body=path.join(root,'body.json');
+fs.writeFileSync(video,'original-video');fs.writeFileSync(body,'{}');
+const digest='a'.repeat(64), times=[0,100,250,400,550,700];
+const manualVideoClocks=createVideoClock({probe:async()=>({times,frameCount:times.length}),hash:async()=>digest});
+let automatic=null;const impactReviews={read:()=>automatic};
+const app=express();app.use(express.json());const calls=[];
+const shot={status:'done',metadata:{analysisInput:{path:video},bodyPath:body}};let shotExists=true;
+const shotStore={getShotByJobId:id=>id==='job'&&shotExists?shot:null};
+const source=fs.readFileSync(new URL('../server.js',import.meta.url),'utf8');
+const cut=(a,b)=>source.slice(source.indexOf(a),source.indexOf(b,source.indexOf(a)));
+const context={app,fs,path,uploadDir:root,dataDir:root,manualVideoClocks,impactReviews,selectVideoReference,
+  matchesVideoIdentity,shotStore,readAnalysisCache:()=>null,reviewVideoPath:async input=>input,bodyArtifactPath:()=>body,
+  inferUrl:p=>p,inferFetchJson:async(url,options)=>{calls.push({url,...options});return url.endsWith('pose-overlay')
+    ? {ok:true,json:{ok:true,jobId:'job',status:'ready',timeSource:'video_pts',poseFrames:[{frame:0,timeMs:0,keypoints:{nose:[.4,.3,.9]}}]}}
+    : {ok:true,json:{ok:true,jobId:'job',status:'unavailable',reason:'SILHOUETTE_UNRELIABLE'}};}};
+vm.runInNewContext(cut('function resolveReviewReference(',"app.get('/api/analyze/:jobId/video-clock'"),context);
+vm.runInNewContext(cut("app.get('/api/analyze/:jobId/video-clock'","app.post('/api/analyze/:jobId/club-review'"),context);
+vm.runInNewContext(cut("app.get('/api/analyze/:jobId/pose-overlay'","app.get('/api/analyze/:jobId',"),context);
+const server=app.listen(0,'127.0.0.1');
+try {
+  await new Promise(resolve=>server.once('listening',resolve));
+  const base=`http://127.0.0.1:${server.address().port}/api/analyze/job`;
+  const clock=await (await fetch(`${base}/video-clock`)).json();
+  assert.equal(clock.videoSha256,digest);assert.equal(clock.candidate,undefined);
+  shot.status='running';assert.equal((await fetch(`${base}/video-clock`)).status,409);shot.status='done';
+  const escape=path.join(root,'escape');fs.symlinkSync('/etc/hosts',escape);shot.metadata.analysisInput.path=escape;
+  assert.equal((await fetch(`${base}/video-clock`)).status,403,'resolved paths must stay in the upload or data root');
+  shot.metadata.analysisInput.path=video;
+  assert.equal((await fetch(`${base}/review-video?v=${digest}`,{headers:{Range:'bytes=0-2'}})).status,206);
+  assert.equal((await fetch(`${base}/pose-overlay?v=${digest}`)).status,200);
+  const input={addressMs:100,comparisonMs:620,viewpoint:'down_the_line',mode:'coaching',videoSha256:digest,impactFrameIndex:5};
+  const post=value=>fetch(`${base}/practice-review`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(value)});
+  assert.equal((await post(input)).status,200);
+  assert.equal(calls.at(-1).body.impactMs,700);
+  assert.equal((await post({...input,impactFrameIndex:undefined})).status,409,'manual clock must never supply an automatic impact');
+  assert.equal((await post({...input,videoSha256:'b'.repeat(64)})).status,409);
+  assert.equal((await post({...input,impactFrameIndex:999})).status,400);
+  const stat=fs.statSync(video);
+  automatic={inputPath:video,dev:stat.dev,ino:stat.ino,size:stat.size,mtimeMs:stat.mtimeMs,ctimeMs:stat.ctimeMs,
+    result:{videoSha256:digest,timingRevision:3,frameTimesMs:times,candidate:{timeMs:550}}};
+  assert.equal((await post({...input,impactFrameIndex:undefined,comparisonMs:470})).status,200);
+  assert.equal(calls.at(-1).body.impactMs,550,'a valid automatic candidate retains its existing behavior');
+  const reassigned=path.join(root,'reassigned.mp4');fs.writeFileSync(reassigned,'new association');
+  shot.metadata.analysisInput.path=reassigned;
+  assert.equal((await post({...input,impactFrameIndex:undefined,comparisonMs:470})).status,409,'old automatic references cannot follow a reassigned record');
+  shot.metadata.analysisInput.path=video;
+  automatic=null;
+  shot.metadata.handedness='left';
+  assert.equal((await fetch(`${base}/video-clock`)).status,422);
+  assert.equal((await post(input)).status,422,'manual selection must not bypass the right-handed input scope');
+  delete shot.metadata.handedness;
+  shot.metadata.viewpoint='face_on';
+  assert.equal((await fetch(`${base}/video-clock`)).status,422);
+  assert.equal((await post(input)).status,422);
+  delete shot.metadata.viewpoint;
+  const replacement=path.join(root,'replacement.mp4');fs.writeFileSync(replacement,'new video');
+  shot.metadata.analysisInput.path=replacement;
+  assert.equal((await fetch(`${base}/review-video?v=${digest}`)).status,409,'old source must not follow a reassigned record');
+  assert.equal((await fetch(`${base}/pose-overlay?v=${digest}`)).status,409);
+  assert.equal((await post(input)).status,409);
+  shot.metadata.analysisInput.path=video;
+  shotExists=false;
+  assert.equal((await fetch(`${base}/review-video?v=${digest}`)).status,404,'deleting a record must revoke cached manual playback');
+  shotExists=true;
+  fs.appendFileSync(video,'changed');
+  assert.equal((await fetch(`${base}/review-video?v=${digest}`)).status,409);
+  assert.equal((await fetch(`${base}/pose-overlay?v=${digest}`)).status,409);
+  assert.equal((await post(input)).status,409,'stale clocks cannot be used for coaching');
+  console.log('manual impact fallback: identity, video range, pose, explicit selection and stale-source checks passed');
+} finally {await new Promise(resolve=>server.close(resolve));fs.rmSync(root,{recursive:true,force:true});}

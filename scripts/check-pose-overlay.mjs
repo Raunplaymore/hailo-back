@@ -18,6 +18,7 @@ vm.runInNewContext(source.slice(start,end),{
   shotStore:{getShotByJobId:id=>id==='job'?{status:'done',metadata:{bodyPath:'/data/body.json'}}:null},
   readAnalysisCache:()=>({status:analysisStatus}),
   impactReviews:{read:()=>({...video,inputPath:'/uploads/clip.mp4',result:{videoSha256:'a'.repeat(64),timingRevision,frameTimesMs:clock}})},
+  resolveReviewReference:()=>({...video,inputPath:'/uploads/clip.mp4',result:{videoSha256:'a'.repeat(64),timingRevision,frameTimesMs:clock}}),
   fs:{existsSync:()=>true,statSync:path=>path==='/data/body.json'?{...body,ctimeMs:body.ctimeMs+bodyChange}:{...video,ctimeMs:video.ctimeMs+videoChange}},
   matchesVideoIdentity,bodyArtifactPath:()=>'/data/fallback.json',inferUrl:p=>p,
   inferFetchJson:async(url,options)=>{calls.push({url,...options});if(mutate==='video')videoChange++;if(mutate==='body')bodyChange++;return upstream;},
