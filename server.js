@@ -3,7 +3,7 @@ const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
-const { randomUUID } = require('crypto');
+const { randomUUID, createHash } = require('crypto');
 const { spawn } = require('child_process');
 const {
   buildFrameSequenceFromFile,
@@ -73,6 +73,11 @@ function scheduleAutomaticImpact(jobId, inputPath, bodyPath = null) {
   // This queue never changes the legacy coach result, timing metrics or training labels.
   try { return impactReviews.schedule(jobId, inputPath, bodyPath); }
   catch (error) { return Promise.reject(error); }
+}
+async function hashVideoFile(inputPath) {
+  const hash = createHash('sha256');
+  for await (const chunk of fs.createReadStream(inputPath)) hash.update(chunk);
+  return hash.digest('hex');
 }
 function queueAutomaticImpact(jobId, inputPath, bodyPath = null, geometry = null) {
   const metadata = geometry || shotStore.getShotByJobId(jobId)?.metadata;
@@ -1971,10 +1976,16 @@ async function requestDtlClubPointsV2SidecarAnalysis({ jobId, metaPath, bodyPath
   if (!url || !metaPath) return null;
   const response = await inferFetchJson(url, {
     method: 'POST',
-    body: { jobId, metaPath, bodyPath: bodyPath || null, takeawayProfile: DTL_V2_TAKEAWAY_PROFILE, impactMs },
+    body: { jobId, metaPath, bodyPath: bodyPath || null, allowBodyFallback: false, takeawayProfile: DTL_V2_TAKEAWAY_PROFILE, impactMs },
     timeoutMs: 30_000,
   });
-  return response.ok && response.json?.ok === true && response.json?.result
+  if (!response.ok && response.json?.detail?.jobId === jobId && response.json?.detail?.errorCode === 'BODY_UNAVAILABLE') {
+    const error = new Error('The requested body artifact is missing or unreadable');
+    error.code = 'BODY_UNAVAILABLE';
+    throw error;
+  }
+  return response.ok && response.json?.ok === true && response.json?.jobId === jobId
+    && response.json?.bodyFallbackAllowed === false && response.json?.result?.jobId === jobId
     ? response.json.result
     : null;
 }
@@ -2081,7 +2092,7 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false, refresh = false 
       updateRun({ status: 'failed', error: 'analysis input unavailable' });
       return;
     }
-    const sourceIdentity = refresh ? fs.statSync(shotInputPath) : null;
+    const sourceIdentity = fs.statSync(shotInputPath);
     // Upload analysis normally leaves a converted MP4 in analysisInput. Legacy
     // re-analysis may only have the original MOV, while camera file inference
     // deliberately accepts MP4/H264/JPEG inputs. Reuse the same preparation
@@ -2094,9 +2105,9 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false, refresh = false 
       }
       inputPath = prepared.path;
     }
-    const videoIdentity = refresh ? fs.statSync(inputPath) : null;
+    const videoIdentity = fs.statSync(inputPath);
     const hasBody = fs.existsSync(bodyPath);
-    const bodyIdentity = refresh && hasBody ? fs.statSync(bodyPath) : null;
+    const bodyIdentity = hasBody ? fs.statSync(bodyPath) : null;
     updateRun({
       status: 'running', model: 'dtl_club_points_v2', startedAt: new Date().toISOString(),
     });
@@ -2113,8 +2124,19 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false, refresh = false 
       updateRun({ status: 'failed', error: 'DTL V2 meta generation failed' });
       return;
     }
-    const impact = await scheduleAutomaticImpact(jobId, inputPath, hasBody ? bodyPath : null);
-    const result = await requestDtlClubPointsV2SidecarAnalysis({ jobId, metaPath: generated.metaPath, bodyPath: refresh && !hasBody ? null : bodyPath, impactMs: impact?.candidate?.timeMs });
+    let impact = null;
+    try {
+      impact = await scheduleAutomaticImpact(jobId, inputPath, hasBody ? bodyPath : null);
+      if (!Number.isFinite(impact?.candidate?.timeMs)) throw new Error('Invalid impact candidate');
+    }
+    catch (error) {
+      impact = null;
+      console.warn(`[dtl-v2-sidecar] ${jobId} impact unavailable: ${error.message}`);
+      if (refresh && [current, debugSidecar].some(value => value?.observations?.levels?.some(level => level?.status === 'observation'))) {
+        throw new Error('Impact candidate unavailable; previous club comparison preserved');
+      }
+    }
+    const result = await requestDtlClubPointsV2SidecarAnalysis({ jobId, metaPath: generated.metaPath, bodyPath: hasBody ? bodyPath : null, impactMs: impact?.candidate?.timeMs });
     if (!result) {
       updateRun({
         status: 'failed', metaPath: generated.metaPath, error: 'DTL V2 sidecar analysis failed',
@@ -2122,17 +2144,25 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false, refresh = false 
       return;
     }
     const sidecar = summarizeDtlClubPointsV2(result, generated.metaPath, generated.durationMs);
+    if (!impact) {
+      sidecar.overlayVideoSha256 = await hashVideoFile(inputPath);
+      sidecar.pendingOverlay = sidecar.overlay;
+      sidecar.overlay = null;
+      sidecar.observations = { status: 'withheld', revision: 1, automaticCoachingReady: false,
+        reason: 'IMPACT_CANDIDATE_UNAVAILABLE', levels: [] };
+    }
     const updated = readAnalysisCache(jobId);
-    const updatedShot = refresh ? shotStore.getShotByJobId(jobId) : null;
+    const guarded = refresh || !impact;
+    const updatedShot = guarded ? shotStore.getShotByJobId(jobId) : null;
     const updatedInputPath = updatedShot?.metadata?.analysisInput?.path || updatedShot?.media?.path;
-    const updatedBodyPath = refresh ? updated?.progress?.bodyPath || updatedShot?.metadata?.bodyPath || bodyArtifactPath(jobId) : null;
-    if (refresh && (!updated || updated.status !== 'done' || updated.dtlClubRefresh?.id !== refreshId
+    const updatedBodyPath = guarded ? updated?.progress?.bodyPath || updatedShot?.metadata?.bodyPath || bodyArtifactPath(jobId) : null;
+    if (guarded && (!updated || updated.status !== 'done' || (refresh && updated.dtlClubRefresh?.id !== refreshId)
       || !updatedInputPath || path.resolve(updatedInputPath) !== path.resolve(shotInputPath)
       || !updatedBodyPath || path.resolve(updatedBodyPath) !== path.resolve(bodyPath)
       || updatedShot?.metadata?.viewpoint !== shot?.metadata?.viewpoint
       || updatedShot?.metadata?.handedness !== shot?.metadata?.handedness
       || !matchesVideoIdentity(sourceIdentity, fs.statSync(shotInputPath))
-      || JSON.stringify([updated.dtlClubPointsV2 || null, updated.analysis?.debug?.dtlClubPointsV2 || null]) !== baselineSidecar
+      || (refresh && JSON.stringify([updated.dtlClubPointsV2 || null, updated.analysis?.debug?.dtlClubPointsV2 || null]) !== baselineSidecar)
       || !matchesVideoIdentity(videoIdentity, fs.statSync(inputPath))
       || fs.existsSync(bodyPath) !== hasBody
       || (bodyIdentity && !matchesVideoIdentity(bodyIdentity, fs.statSync(bodyPath)))
@@ -2142,7 +2172,7 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false, refresh = false 
     const analysis = updated?.analysis && typeof updated.analysis === 'object' ? { ...updated.analysis } : null;
     const takeawayMs = sidecar.takeaway.timeMs;
     const primaryTakeaway = analysis?.events?.takeaway ?? analysis?.events?.takeawayMs;
-    if (!refresh && analysis && primaryTakeaway == null && Number.isFinite(takeawayMs)
+    if (!refresh && impact && analysis && primaryTakeaway == null && Number.isFinite(takeawayMs)
       && ['confirmed', 'reference'].includes(sidecar.takeaway.status)) {
       analysis.events = Object.prototype.hasOwnProperty.call(analysis.events || {}, 'takeawayMs')
         ? { ...analysis.events, takeawayMs }
@@ -2191,7 +2221,7 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false, refresh = false 
   });
   dtlClubPointsV2Tail = run.catch((error) => {
     console.warn(`[dtl-v2-sidecar] ${jobId} failed: ${error.message}`);
-    updateRun({ status: 'failed', error: error.message });
+    updateRun({ status: 'failed', error: error.message, ...(error.code === 'BODY_UNAVAILABLE' ? { errorCode: error.code } : {}) });
   }).finally(() => activeDtlClubPointsV2.delete(jobId));
   return { scheduled: true, reason: 'queued', ...(refresh ? { refreshId } : {}) };
 }
@@ -3613,15 +3643,63 @@ app.post('/api/analyze/:jobId/impact-review', async (req, res) => {
   }
 });
 
+app.get('/api/analyze/:jobId/pose-overlay', async (req, res) => {
+  const { jobId } = req.params;
+  const videoSha256 = req.query.v;
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId) || typeof videoSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(videoSha256)) {
+    return res.status(400).json({ ok: false, error: '영상 식별 정보를 확인해 주세요.' });
+  }
+  const shot = shotStore.getShotByJobId(jobId);
+  if (!shot) return res.status(404).json({ ok: false, error: '저장된 영상을 찾을 수 없습니다.' });
+  const status = readAnalysisCache(jobId)?.status || shot.status;
+  if (['pending', 'queued', 'running'].includes(status)) return res.status(409).json({ ok: false, error: '영상 분석이 끝난 뒤 다시 시도해 주세요.' });
+  const cached = impactReviews.read(jobId);
+  const times = cached?.result?.frameTimesMs;
+  if (cached?.result?.videoSha256 !== videoSha256 || cached?.result?.timingRevision !== 3
+      || !Array.isArray(times) || times.length < 4 || times.length > 7200
+      || !times.every((t, i) => Number.isFinite(t) && t >= 0 && t <= 30000 && (i === 0 || t > times[i - 1]))) {
+    return res.status(409).json({ ok: false, error: '영상의 프레임 시각을 다시 확인해 주세요.' });
+  }
+  const inputPath = cached.inputPath;
+  const bodyPath = shot.metadata?.bodyPath || bodyArtifactPath(jobId);
+  try {
+    if (!inputPath || !fs.existsSync(inputPath) || !fs.existsSync(bodyPath)) return res.status(404).json({ ok: false, error: '영상 또는 자세 분석이 없습니다.' });
+    const originalBody = fs.statSync(bodyPath);
+    if (!matchesVideoIdentity(cached, fs.statSync(inputPath))) return res.status(409).json({ ok: false, error: '영상이 변경됐습니다. 다시 확인해 주세요.' });
+    const response = await inferFetchJson(inferUrl('/v1/pose-overlay'), { method: 'POST', timeoutMs: 30000, body: { jobId, inputPath, bodyPath } });
+    if (!response.ok) return res.status(response.status === 409 ? 409 : 422).json({ ok: false, error: '영상과 자세 표시의 연결을 확인하지 못했습니다.' });
+    const currentBody = fs.statSync(bodyPath);
+    if (!matchesVideoIdentity(cached, fs.statSync(inputPath)) || !['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].every(key => originalBody[key] === currentBody[key])) {
+      return res.status(409).json({ ok: false, error: '영상이나 자세 분석이 변경됐습니다. 다시 확인해 주세요.' });
+    }
+    const result = response.json, frames = result?.poseFrames;
+    if (result?.ok !== true || result.jobId !== jobId || result.timeSource !== 'video_pts'
+        || !['ready', 'unavailable'].includes(result.status) || !Array.isArray(frames) || frames.length > 7200
+        || (result.status === 'ready' ? frames.length === 0 : frames.length !== 0)
+        || !frames.every((frame, i) => frame && Number.isSafeInteger(frame.frame) && frame.frame >= 0 && frame.frame < times.length
+          && (!i || frame.frame > frames[i - 1].frame) && frame.timeMs === times[frame.frame]
+          && frame.keypoints && typeof frame.keypoints === 'object' && !Array.isArray(frame.keypoints)
+          && Object.entries(frame.keypoints).every(([name, point]) => /^(nose|(left|right)_(shoulder|elbow|wrist|hip|knee|ankle))$/.test(name)
+            && Array.isArray(point) && point.length === 3 && point.every(Number.isFinite) && point[2] >= 0 && point[2] <= 1))
+        || (result.status === 'ready' && !frames.some(frame => Object.keys(frame.keypoints).length > 0))) {
+      return res.status(502).json({ ok: false, error: '자세 프레임 시각을 확인하지 못했습니다.' });
+    }
+    return res.json({ ok: true, jobId, status: result.status, timeSource: 'video_pts', poseFrames: frames, videoSha256 });
+  } catch (error) {
+    return res.status(502).json({ ok: false, error: '자세 표시를 준비하지 못했습니다. 다시 시도해 주세요.' });
+  }
+});
+
 app.post('/api/analyze/:jobId/practice-review', async (req, res) => {
   const { jobId } = req.params;
-  const { addressMs, comparisonMs, viewpoint, confirmedFrames, videoSha256, mode } = req.body || {};
+  const { addressMs, comparisonMs, viewpoint, confirmedFrames, videoSha256, mode, impactFrameIndex } = req.body || {};
   const coaching = mode === 'coaching';
   const preview = mode === 'preview' || coaching;
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(jobId) || !Number.isFinite(addressMs) || !Number.isFinite(comparisonMs)
       || addressMs < 0 || comparisonMs > 30000 || comparisonMs - addressMs < 150
       || viewpoint !== 'down_the_line' || (!preview && confirmedFrames !== true)
       || (videoSha256 !== undefined && !/^[a-f0-9]{64}$/.test(videoSha256))
+      || (impactFrameIndex !== undefined && (!coaching || !Number.isSafeInteger(impactFrameIndex) || impactFrameIndex < 0))
       || (coaching && typeof videoSha256 !== 'string')) {
     return res.status(400).json({ ok: false, error: '고정된 DTL 영상에서 어드레스와 임팩트 직전 장면을 확인해 주세요.' });
   }
@@ -3646,12 +3724,29 @@ app.post('/api/analyze/:jobId/practice-review', async (req, res) => {
       return res.status(409).json({ ok: false, error: '영상이 변경됐습니다. 새로고침 후 장면을 다시 선택해 주세요.' });
     }
   }
+  let impactMs = cached?.result?.candidate?.timeMs;
+  let effectiveComparisonMs = comparisonMs;
+  if (impactFrameIndex !== undefined) {
+    const times = cached?.result?.frameTimesMs;
+    if (!Array.isArray(times) || times.length < 4 || times.length > 7200
+        || !times.every((time, index) => Number.isFinite(time) && time >= 0 && time <= 30000 && (index === 0 || time > times[index - 1]))) {
+      return res.status(409).json({ ok: false, error: '영상의 프레임 시각을 확인할 수 없습니다. 새로고침 후 다시 선택해 주세요.' });
+    }
+    impactMs = times[impactFrameIndex];
+    if (!Number.isFinite(impactMs) || impactMs - addressMs < 230 || Math.abs(comparisonMs - (impactMs - 80)) > 1) {
+      return res.status(400).json({ ok: false, error: '준비 자세보다 뒤의 타격 장면을 다시 선택해 주세요.' });
+    }
+    effectiveComparisonMs = impactMs - 80;
+  }
   try {
     const response = await inferFetchJson(inferUrl(coaching ? '/v1/coaching-review' : preview ? '/v1/practice-preview' : '/v1/practice-review'), {
       method: 'POST', timeoutMs: coaching ? 30000 : 10000,
-      body: { jobId, inputPath, bodyPath, addressMs, comparisonMs, viewpoint, ...(preview ? { impactMs: cached?.result?.candidate?.timeMs } : { confirmedFrames }) },
+      body: { jobId, inputPath, bodyPath, addressMs, comparisonMs: effectiveComparisonMs, viewpoint, ...(preview ? { impactMs } : { confirmedFrames }) },
     });
     if (!response.ok) return res.status(!response.status || response.status >= 500 ? 502 : response.status === 409 ? 409 : 422).json({ ok: false, error: typeof response.json?.detail === 'string' ? response.json.detail : '자세 비교를 완료하지 못했습니다.' });
+    if (cached && (!fs.existsSync(inputPath) || !matchesVideoIdentity(cached, fs.statSync(inputPath)))) {
+      return res.status(409).json({ ok: false, error: '영상이 변경됐습니다. 새로고침 후 장면을 다시 선택해 주세요.' });
+    }
     return res.json(response.json);
   } catch (error) {
     return res.status(502).json({ ok: false, error: '자세 분석 서버에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.' });

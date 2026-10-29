@@ -66,7 +66,7 @@ let runs = 0;
 const gate = new Promise(resolve => {release = resolve;});
 const queueContext = {
   console, Date, path, DTL_V2_TAKEAWAY_PROFILE: 'test',
-  fs: {existsSync: () => true},
+  fs: {existsSync: () => true, statSync: () => identity},
   readAnalysisCache: () => queuedCache,
   isStaleDtlClubPointsV2Run: () => false,
   updateDtlClubPointsV2Cache: (_id, sidecar) => {queuedCache = {...queuedCache, dtlClubPointsV2: sidecar};},
