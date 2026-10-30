@@ -10,7 +10,8 @@ const {createImpactReviewCache,matchesVideoIdentity}=require('../store/impactRev
 const {selectVideoReference}=require('../store/videoClock.js');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'impact-pose-integration-'));
 const video=path.join(root,'video.mp4'),body=path.join(root,'body.json'),replacement=path.join(root,'replacement.json');
-const digest='a'.repeat(64), times=[0,100,250,400,550,700], model='70b338b519565f870ed1fce044a0453f828773e53b9fa9d024391b3b4cf57733';
+const digest='a'.repeat(64), model='70b338b519565f870ed1fce044a0453f828773e53b9fa9d024391b3b4cf57733';
+let times=[0,100,250,400,550,700,900];
 fs.writeFileSync(video,'video');fs.writeFileSync(body,JSON.stringify({frame:4}));
 let runs=0, changeBodyDuringCoaching=false, upstreamCalls=0, useFallback=false;
 const impactReviews=createImpactReviewCache({dataDir:root,run:async(jobId,_input,pose)=>{
@@ -61,5 +62,13 @@ try {
   assert.equal((await post(request)).status,409,'changed actual fallback blocks the old automatic candidate');
   assert.equal(upstreamCalls,beforeFallback,'stale fallback must not reach coaching');
   assert.equal((await post({...request,impactFrameIndex:5,comparisonMs:620})).status,200,'manual impact remains available');
+  useFallback=false;times=[0,100,250,400,550,600];
+  fs.writeFileSync(replacement,JSON.stringify({frame:4}));fs.renameSync(replacement,body);
+  await impactReviews.schedule('job',video,body);
+  const beforeNearEnd=upstreamCalls;
+  const nearEnd=await post(request);
+  assert.equal(nearEnd.status,409);assert.equal((await nearEnd.json()).code,'IMPACT_CONFIRMATION_REQUIRED');
+  assert.equal(upstreamCalls,beforeNearEnd,'a near-end automatic candidate does not reach coaching');
+  assert.equal((await post({...request,impactFrameIndex:4})).status,200,'the user can explicitly select that same frame');
   console.log('impact cache and coaching route preserve pose identity and manual selection');
 } finally {await new Promise(resolve=>server.close(resolve));fs.rmSync(root,{recursive:true,force:true});}

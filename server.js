@@ -4034,6 +4034,17 @@ app.post('/api/analyze/:jobId/practice-review', async (req, res) => {
   if (usesAutomaticImpact && !automaticImpactCurrent()) {
     return res.status(409).json({ ok: false, error: '자세 분석과 임팩트 후보의 연결을 확인하지 못했습니다. 새로고침 후 다시 확인해 주세요.' });
   }
+  if (coaching && impactFrameIndex === undefined) {
+    const times = cached?.result?.frameTimesMs;
+    if (!Array.isArray(times) || times.length < 4 || times.length > 7200 || times[0] !== 0
+        || !times.every((time, index) => Number.isFinite(time) && time >= 0 && time <= 30000 && (index === 0 || time > times[index - 1]))) {
+      return res.status(409).json({ ok: false, error: '영상의 프레임 시각을 확인할 수 없습니다. 새로고침 후 다시 선택해 주세요.' });
+    }
+    // shortcut: 100ms asks for review; it does not prove the swing is incomplete.
+    if (times[times.length - 1] - impactMs <= 100) {
+      return res.status(409).json({ ok: false, code: 'IMPACT_CONFIRMATION_REQUIRED', error: '임팩트 후보가 영상 끝과 가까워요. 임팩트 탭에서 타격 장면을 직접 확인해 주세요.' });
+    }
+  }
   try {
     const response = await inferFetchJson(inferUrl(coaching ? '/v1/coaching-review' : preview ? '/v1/practice-preview' : '/v1/practice-review'), {
       method: 'POST', timeoutMs: coaching ? 55000 : 10000,

@@ -51,6 +51,17 @@ assert.equal(calls.at(-1).timeoutMs,55000,'coaching allows the observed slow fir
 assert.equal(calls.at(-1).body.impactMs,550,'coaching also uses only the stored candidate');
 assert.equal(calls.at(-1).body.confirmedFrames,undefined);
 upstream={ok:true,json:{ok:true,status:'withheld'}};
+const beforeNearEnd=calls.length;
+frameTimes=[0,100,250,400,550,650];
+const nearEnd=await request({...valid,mode:'coaching',videoSha256:'a'.repeat(64)});
+assert.equal(nearEnd.statusCode,409);assert.equal(nearEnd.data.code,'IMPACT_CONFIRMATION_REQUIRED');
+assert.equal(calls.length,beforeNearEnd,'automatic near-end candidate must not reach coaching');
+assert.equal((await request({...valid,mode:'coaching',videoSha256:'a'.repeat(64),impactFrameIndex:4,comparisonMs:470})).statusCode,200,'a verified manual frame remains usable');
+frameTimes=[0,100,250,400,550,650.001];
+assert.equal((await request({...valid,mode:'coaching',videoSha256:'a'.repeat(64)})).statusCode,200,'a tail longer than 100ms is not blocked');
+frameTimes=[0,100,250,400,550,NaN];
+assert.equal((await request({...valid,mode:'coaching',videoSha256:'a'.repeat(64)})).statusCode,409,'invalid automatic frame clocks are withheld');
+frameTimes=[0,100,250,400,550,700];
 bodyCurrent=false;
 const beforeStaleBody=calls.length;
 assert.equal((await request({...valid,mode:'coaching',videoSha256:'a'.repeat(64)})).statusCode,409,'outdated pose cannot use an automatic candidate');
