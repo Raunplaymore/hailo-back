@@ -26,10 +26,15 @@ try {
   const times = raw.map(time => Math.round((time - raw[0]) * 1000) / 1000);
   assert.ok(times.length >= 4 && times.every((time, i) => Number.isFinite(time) && (i === 0 || time > times[i-1])));
   const digest = crypto.createHash('sha256').update(fs.readFileSync(video)).digest('hex');
+  const pose = path.join(root,'impact-review',digest,'body','pose.json');
+  fs.mkdirSync(path.dirname(pose),{recursive:true});fs.writeFileSync(pose,'{}');
+  const poseStat = fs.statSync(pose,{bigint:true});
+  const poseIdentity = [poseStat.dev,poseStat.ino,poseStat.size,poseStat.mtimeNs,poseStat.ctimeNs].map(String);
   const result = {ok:true,jobId:'known',status:'reference_candidate',timingRevision:3,
     modelSha256:'70b338b519565f870ed1fce044a0453f828773e53b9fa9d024391b3b4cf57733',videoSha256:digest,
     publicValue:null,automaticCoachingReady:false,appliedToPrimary:false,inputScopeConfirmed:false,
-    frameTimesMs:times,candidate:{frameIndex:1,timeMs:times[1]}};
+    frameTimesMs:times,candidate:{frameIndex:1,timeMs:times[1]},
+    poseProvenance:{version:1,kind:'isolated',statToken:crypto.createHash('sha256').update(JSON.stringify(poseIdentity)).digest('hex')}};
   const impactReviews = createImpactReviewCache({dataDir:root,run:async()=>result});
   await impactReviews.schedule('known',video);
   let probes=0, conversions=0;

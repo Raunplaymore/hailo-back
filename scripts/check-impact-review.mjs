@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile, mkdtemp, writeFile, rm, stat, utimes, rename } from 'node:fs/promises';
+import { mkdirSync, existsSync, writeFileSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
@@ -35,10 +37,21 @@ assert.equal(calls.length, 1);
 const root = await mkdtemp(join(tmpdir(), 'impact-cache-'));
 try {
   const video=join(root,'video.mp4'); await writeFile(video,'original video');
-  const result = (jobId) => ({ok:true, jobId, status:'reference_candidate',timingRevision:3,modelSha256:'70b338b519565f870ed1fce044a0453f828773e53b9fa9d024391b3b4cf57733',videoSha256:'a'.repeat(64),publicValue:null,automaticCoachingReady:false,appliedToPrimary:false,inputScopeConfirmed:false});
+  const result = (jobId, dataDir, bodyPath = null) => {
+    const videoSha256 = 'a'.repeat(64);
+    const actual = bodyPath || join(dataDir, 'impact-review', videoSha256, 'body', 'pose.json');
+    if (!bodyPath) {
+      mkdirSync(join(dataDir, 'impact-review', videoSha256, 'body'), {recursive:true});
+      if (!existsSync(actual)) writeFileSync(actual, '{}');
+    }
+    const s = statSync(actual, {bigint:true});
+    const identity = [s.dev,s.ino,s.size,s.mtimeNs,s.ctimeNs].map(String);
+    return {ok:true, jobId, status:'reference_candidate',timingRevision:3,modelSha256:'70b338b519565f870ed1fce044a0453f828773e53b9fa9d024391b3b4cf57733',videoSha256,publicValue:null,automaticCoachingReady:false,appliedToPrimary:false,inputScopeConfirmed:false,
+      poseProvenance:{version:1,kind:bodyPath?'provided':'isolated',statToken:createHash('sha256').update(JSON.stringify(identity)).digest('hex')}};
+  };
   let runs=0; let release;
   const gate=new Promise(resolve=>{release=resolve;});
-  const cache=cacheModule.createImpactReviewCache({dataDir:root,run:async (id)=>{runs++;await gate;return result(id);}});
+  const cache=cacheModule.createImpactReviewCache({dataDir:root,run:async (id)=>{runs++;await gate;return result(id,root);}});
   const first=cache.schedule('job',video), duplicate=cache.schedule('job',video);
   assert.equal(first,duplicate,'same input must join the active request');
   release(); await first; assert.equal(runs,1);
@@ -57,28 +70,29 @@ try {
   await cache.schedule('job',video);assert.equal(runs,3,'old incomplete identity must be recomputed');
   await writeFile(video,'changed source video');
   await cache.schedule('job',video); assert.equal(runs,4,'changed video must invalidate cache');
-  const racing=cacheModule.createImpactReviewCache({dataDir:join(root,'race'),run:async(id)=>{await writeFile(video,'modified during inference');return result(id);}});
+  const racing=cacheModule.createImpactReviewCache({dataDir:join(root,'race'),run:async(id)=>{await writeFile(video,'modified during inference');return result(id,join(root,'race'));}});
   await assert.rejects(racing.schedule('race',video),/changed during impact analysis/);
   assert.equal(racing.read('race'),null,'changed inputs must never leave a saved candidate');
   await writeFile(video,'changed source video');
   const same=join(root,'same.mp4'), replacement=join(root,'replacement.mp4'), fixed=new Date('2020-01-01T00:00:00.000Z');
   await writeFile(same,'video');await utimes(same,fixed,fixed);let sameRuns=0;
-  const sameCache=cacheModule.createImpactReviewCache({dataDir:join(root,'same-cache'),run:async(id)=>{sameRuns++;return result(id);}});
+  const sameCache=cacheModule.createImpactReviewCache({dataDir:join(root,'same-cache'),run:async(id)=>{sameRuns++;return result(id,join(root,'same-cache'));}});
   await sameCache.schedule('same',same);const before=await stat(same);
   await writeFile(replacement,'other');await utimes(replacement,fixed,fixed);await rename(replacement,same);
   const after=await stat(same);assert.equal(after.size,before.size);assert.equal(after.mtimeMs,before.mtimeMs);assert.notEqual(after.ino,before.ino);
   await sameCache.schedule('same',same);assert.equal(sameRuns,2,'same-size replacement with preserved mtime must invalidate the candidate');
-  const invalidHash=cacheModule.createImpactReviewCache({dataDir:join(root,'bad-hash'),run:async(id)=>({...result(id),videoSha256:'invalid'})});
+  const invalidHash=cacheModule.createImpactReviewCache({dataDir:join(root,'bad-hash'),run:async(id)=>({...result(id,join(root,'bad-hash')),videoSha256:'invalid'})});
   await assert.rejects(invalidHash.schedule('bad-hash',same),/Invalid automatic impact/);
   assert.equal(invalidHash.read('bad-hash'),null);
-  const retry=cacheModule.createImpactReviewCache({dataDir:join(root,'retry'),run:async(id)=>{if(id==='bad')throw Error('failed');return result(id);}});
+  const retry=cacheModule.createImpactReviewCache({dataDir:join(root,'retry'),run:async(id)=>{if(id==='bad')throw Error('failed');return result(id,join(root,'retry'));}});
   await assert.rejects(retry.schedule('bad',video));
   assert.equal((await retry.schedule('good',video)).jobId,'good','failed job must not poison later queued jobs');
 
-  const pose=join(root,'pose.json'), poseReplacement=join(root,'pose-replacement.json');
+  const pose=join(root,'pose-cache','pose.json'), poseReplacement=join(root,'pose-cache','pose-replacement.json');
+  mkdirSync(join(root,'pose-cache'),{recursive:true});
   await writeFile(pose,JSON.stringify({impact:800})); let poseRuns=0;
   const poseCache=cacheModule.createImpactReviewCache({dataDir:join(root,'pose-cache'),run:async(id,_video,body)=>{
-    poseRuns++; return {...result(id),candidate:{timeMs:JSON.parse(await readFile(body,'utf8')).impact}};
+    poseRuns++; return {...result(id,join(root,'pose-cache'),body),candidate:{timeMs:JSON.parse(await readFile(body,'utf8')).impact}};
   }});
   assert.equal((await poseCache.schedule('pose',video,pose)).candidate.timeMs,800);
   assert.ok(poseCache.readCurrent('pose',pose),'unchanged body keeps a reusable result');
@@ -92,19 +106,23 @@ try {
   assert.equal(poseCache.readCurrent('pose',pose),null,'legacy candidate without body provenance is not current');
   await poseCache.schedule('pose',video,pose);assert.equal(poseRuns,3,'legacy candidate is recalculated once');
   let arrivalRuns=0;
-  const arrival=cacheModule.createImpactReviewCache({dataDir:join(root,'arrival'),run:async(id)=>{arrivalRuns++;return result(id);}});
+  const arrivalDir=join(root,'arrival'), arrivalPose=join(arrivalDir,'pose.json');
+  mkdirSync(arrivalDir,{recursive:true}); await writeFile(arrivalPose,'{}');
+  const arrival=cacheModule.createImpactReviewCache({dataDir:arrivalDir,run:async(id,_video,body)=>{arrivalRuns++;return result(id,arrivalDir,body);}});
   await arrival.schedule('arrival',video,null);
   assert.ok(arrival.readCurrent('arrival',null));
-  assert.equal(arrival.readCurrent('arrival',pose),null,'an available pose invalidates a candidate made without one');
-  await arrival.schedule('arrival',video,pose);
+  assert.equal(arrival.readCurrent('arrival',arrivalPose),null,'an available pose invalidates a candidate made without one');
+  await arrival.schedule('arrival',video,arrivalPose);
   assert.equal(arrivalRuns,2,'newly available pose triggers recalculation');
   let bodyStarted, releaseBody;
   const startedBody=new Promise(resolve=>{bodyStarted=resolve;}), bodyGate=new Promise(resolve=>{releaseBody=resolve;});
-  const bodyRace=cacheModule.createImpactReviewCache({dataDir:join(root,'body-race'),run:async(id)=>{
-    bodyStarted();await bodyGate;return result(id);
+  const raceDir=join(root,'body-race'), racePose=join(raceDir,'pose.json'), raceReplacement=join(raceDir,'replacement.json');
+  mkdirSync(raceDir,{recursive:true}); await writeFile(racePose,JSON.stringify({impact:1600}));
+  const bodyRace=cacheModule.createImpactReviewCache({dataDir:raceDir,run:async(id,_video,body)=>{
+    bodyStarted();await bodyGate;return result(id,raceDir,body);
   }});
-  const racingBody=bodyRace.schedule('pose-race',video,pose);await startedBody;
-  await writeFile(poseReplacement,JSON.stringify({impact:2000}));await rename(poseReplacement,pose);releaseBody();
+  const racingBody=bodyRace.schedule('pose-race',video,racePose);await startedBody;
+  await writeFile(raceReplacement,JSON.stringify({impact:2000}));await rename(raceReplacement,racePose);releaseBody();
   await assert.rejects(racingBody,/Body input changed during impact analysis/);
   assert.equal(bodyRace.read('pose-race'),null,'a body changed in flight cannot save a candidate');
   assert.equal((await readFile(video,'utf8')),'changed source video');

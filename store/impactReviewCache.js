@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { createHash } = require('crypto');
 const MODEL_SHA256 = '70b338b519565f870ed1fce044a0453f828773e53b9fa9d024391b3b4cf57733';
 const identityFields = ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'];
 const matchesVideoIdentity = (identity, stat) => Boolean(identity && stat && identityFields.every((key) =>
@@ -23,6 +24,28 @@ function createImpactReviewCache({ dataDir, run }) {
   const active = new Map();
   let tail = Promise.resolve();
   const safeId = (id) => typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id);
+  const actualPoseIdentity = (kind, videoSha256, bodyPath) => {
+    if (!['provided', 'isolated'].includes(kind) || !/^[a-f0-9]{64}$/.test(videoSha256 ?? '')) return null;
+    if (kind === 'provided' && !bodyPath) return null;
+    const inputPath = kind === 'provided' ? path.resolve(bodyPath)
+      : path.resolve(dataDir, 'impact-review', videoSha256, 'body', 'pose.json');
+    try {
+      const realPath = fs.realpathSync(inputPath);
+      const relative = path.relative(fs.realpathSync(dataDir), realPath);
+      if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
+      if (kind === 'isolated' && relative !== path.join('impact-review', videoSha256, 'body', 'pose.json')) return null;
+      const stat = fs.statSync(realPath, { bigint: true });
+      if (!stat.isFile()) return null;
+      return { kind, inputPath, realPath, identity: [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(String) };
+    } catch { return null; }
+  };
+  const matchesActualPose = (cached, bodyPath) => {
+    const saved = cached?.poseIdentity;
+    const current = actualPoseIdentity(saved?.kind, cached?.result?.videoSha256, bodyPath);
+    return Boolean(saved && current && saved.kind === current.kind && saved.inputPath === current.inputPath && saved.realPath === current.realPath
+      && Array.isArray(saved.identity) && saved.identity.length === current.identity.length
+      && saved.identity.every((value, index) => value === current.identity[index]));
+  };
   const read = (jobId) => {
     if (!safeId(jobId)) return null;
     try { return JSON.parse(fs.readFileSync(path.join(directory, `${jobId}.json`), 'utf8')); }
@@ -31,7 +54,8 @@ function createImpactReviewCache({ dataDir, run }) {
   const readCurrent = (jobId, bodyPath = null) => {
     const cached = read(jobId);
     return cached && Object.hasOwn(cached, 'bodyIdentity') && cached.result?.modelSha256 === MODEL_SHA256
-      && cached.result?.timingRevision === 3 && matchesBodyIdentity(cached.bodyIdentity, bodyIdentity(bodyPath)) ? cached : null;
+      && cached.result?.timingRevision === 3 && matchesBodyIdentity(cached.bodyIdentity, bodyIdentity(bodyPath))
+      && matchesActualPose(cached, bodyPath) ? cached : null;
   };
   const schedule = (jobId, inputPath, bodyPath = null) => {
     if (!safeId(jobId)) return Promise.reject(new Error('Invalid jobId'));
@@ -45,7 +69,8 @@ function createImpactReviewCache({ dataDir, run }) {
     const cached = read(jobId);
     if (cached && cached.result?.modelSha256 === MODEL_SHA256 && cached.result?.timingRevision === 3
       && Object.hasOwn(cached, 'bodyIdentity') && matchesBodyIdentity(cached.bodyIdentity, body)
-      && Object.keys(identity).every((k) => cached[k] === identity[k])) return Promise.resolve(cached.result);
+      && Object.keys(identity).every((k) => cached[k] === identity[k])
+      && matchesActualPose(cached, bodyPath)) return Promise.resolve(cached.result);
     const work = tail.then(async () => {
       if (!matchesVideoIdentity(identity, fs.statSync(source)) || !matchesBodyIdentity(body, bodyIdentity(bodyPath))) {
         throw new Error('Video or body changed before impact analysis');
@@ -58,12 +83,27 @@ function createImpactReviewCache({ dataDir, run }) {
         || result.inputScopeConfirmed !== false) throw new Error('Invalid automatic impact candidate');
       if (!matchesVideoIdentity(identity, fs.statSync(source))) throw new Error('Video input changed during impact analysis');
       if (!matchesBodyIdentity(body, bodyIdentity(bodyPath))) throw new Error('Body input changed during impact analysis');
+      const proof = result.poseProvenance;
+      const pose = actualPoseIdentity(proof?.kind, result.videoSha256, bodyPath);
+      const token = pose && createHash('sha256').update(JSON.stringify(pose.identity)).digest('hex');
+      if (proof?.version !== 1 || !pose || typeof proof.statToken !== 'string' || proof.statToken !== token) {
+        throw new Error('Impact pose source could not be verified');
+      }
+      const { poseProvenance: _poseProvenance, ...publicResult } = result;
       fs.mkdirSync(directory, { recursive: true });
       const file = path.join(directory, `${jobId}.json`);
       const temp = `${file}.tmp`;
-      fs.writeFileSync(temp, JSON.stringify({ ...identity, bodyIdentity: body, result }));
-      fs.renameSync(temp, file);
-      return result;
+      const entry = { ...identity, bodyIdentity: body, poseIdentity: pose, result: publicResult };
+      try {
+        fs.writeFileSync(temp, JSON.stringify(entry));
+        if (!matchesVideoIdentity(identity, fs.statSync(source)) || !matchesBodyIdentity(body, bodyIdentity(bodyPath))
+            || !matchesActualPose(entry, bodyPath)) throw new Error('Impact pose or video changed before caching');
+        fs.renameSync(temp, file);
+      } catch (error) {
+        try { fs.unlinkSync(temp); } catch { /* The temporary file may already be absent. */ }
+        throw error;
+      }
+      return publicResult;
     });
     active.set(key, work);
     tail = work.catch(() => undefined);
