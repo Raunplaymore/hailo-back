@@ -11,17 +11,26 @@ const storePath = path.join(dataDir, 'shots.json');
 
 fs.mkdirSync(dataDir, { recursive: true });
 
+function storeUnavailable(cause) {
+  const error = new Error('스윙 기록을 확인할 수 없습니다. 영상은 이미 저장됐을 수 있으니 기록을 복구한 뒤 확인해 주세요.', { cause });
+  error.code = 'SHOT_STORE_UNAVAILABLE';
+  return error;
+}
+
 function loadStore() {
   try {
     const raw = fs.readFileSync(storePath, 'utf8');
-    return JSON.parse(raw);
+    const store = JSON.parse(raw);
+    if (!Array.isArray(store?.sessions) || !Array.isArray(store?.shots)) throw new Error('Invalid shot store structure');
+    return store;
   } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-    try { fs.lstatSync(storePath); } catch (statError) {
-      if (statError.code === 'ENOENT') return { sessions: [], shots: [] };
-      throw statError;
+    if (error.code === 'ENOENT') {
+      try { fs.lstatSync(storePath); } catch (statError) {
+        if (statError.code === 'ENOENT') return { sessions: [], shots: [] };
+        throw storeUnavailable(statError);
+      }
     }
-    throw error;
+    throw storeUnavailable(error);
   }
 }
 
@@ -34,13 +43,13 @@ function saveStore(store) {
     mode = previous.mode & 0o7777;
     target = fs.realpathSync(storePath);
   } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+    if (error.code !== 'ENOENT') throw storeUnavailable(error);
     let missing = false;
     try { fs.lstatSync(storePath); } catch (statError) {
-      if (statError.code !== 'ENOENT') throw statError;
+      if (statError.code !== 'ENOENT') throw storeUnavailable(statError);
       missing = true;
     }
-    if (!missing) throw error;
+    if (!missing) throw storeUnavailable(error);
     mode = undefined;
   }
   const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
@@ -51,7 +60,7 @@ function saveStore(store) {
     fs.renameSync(temporary, target);
   } catch (error) {
     try { fs.unlinkSync(temporary); } catch (cleanupError) { if (cleanupError.code !== 'ENOENT') console.warn('Could not clean temporary shot store:', cleanupError.message); }
-    throw error;
+    throw storeUnavailable(error);
   }
 }
 

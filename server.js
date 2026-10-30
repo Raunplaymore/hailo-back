@@ -289,7 +289,7 @@ async function getVideoMeta(videoPath) {
   }
 }
 
-async function prepareVideoForAnalysis(originalPath, originalFilename) {
+async function prepareVideoForAnalysis(originalPath, originalFilename, retryJobId = null) {
   const ext = path.extname(originalFilename || originalPath || '').toLowerCase();
   if (ext !== '.mov') {
     return { ok: true, path: originalPath, converted: false };
@@ -311,7 +311,8 @@ async function prepareVideoForAnalysis(originalPath, originalFilename) {
   const stats = await fs.promises.stat(originalPath);
   const safeBase = path.basename(originalFilename, ext).replace(/[^\w.-]+/g, '_').slice(0, 60) || 'video';
   const key = `${stats.mtimeMs}-${stats.size}`;
-  const outPath = path.join(convertedDir, `${safeBase}-${key}.mp4`);
+  if (retryJobId !== null && !/^[A-Za-z0-9_-]{1,128}$/.test(retryJobId)) throw new Error('Invalid retry job ID');
+  const outPath = path.join(convertedDir, `${safeBase}-${key}${retryJobId ? `-${retryJobId}` : ''}.mp4`);
 
   if (fs.existsSync(outPath)) {
     return { ok: true, path: outPath, converted: true, conversion: 'cached' };
@@ -2470,10 +2471,14 @@ async function requestBodyAnalysis({
   };
 }
 
-function buildQueuedUploadShot(file, body) {
+function buildQueuedUploadShot(file, body, freshJobId = false) {
   const existing = shotStore.getShotByMediaName(file.filename);
+  const retainedMetadata = freshJobId ? { ...existing?.metadata } : {};
+  delete retainedMetadata.metaPath;
+  delete retainedMetadata.bodyPath;
+  delete retainedMetadata.analysisInput;
   const sourceType = body.sourceType || existing?.sourceType || 'upload';
-  const jobId = existing?.jobId || randomUUID();
+  const jobId = freshJobId ? randomUUID() : existing?.jobId || randomUUID();
   const shotId = existing?.id || randomUUID();
   const sessionId = body.sessionId
     ? shotStore.ensureSessionPersisted(
@@ -2488,6 +2493,7 @@ function buildQueuedUploadShot(file, body) {
         { sourceType },
       );
   const metadata = {
+    ...retainedMetadata,
     club: body.club,
     viewpoint: ['down_the_line', 'face_on'].includes(body.viewpoint) ? body.viewpoint : 'unknown',
     handedness: ['right', 'left'].includes(body.handedness) ? body.handedness : 'unknown',
@@ -2510,6 +2516,7 @@ function buildQueuedUploadShot(file, body) {
     sourceType,
     createdAt: existing?.createdAt || new Date().toISOString(),
     media: {
+      ...existing?.media,
       filename: file.filename,
       path: file.path,
       size: file.size,
@@ -2518,7 +2525,7 @@ function buildQueuedUploadShot(file, body) {
       ...metadata,
       metaPath: resolveMetaPath(body.metaPath, jobId) || undefined,
     },
-    analysis: existing?.analysis ?? null,
+    analysis: freshJobId ? null : existing?.analysis ?? null,
   };
   shotStore.upsertShot(queuedShot);
   return queuedShot;
@@ -2558,11 +2565,11 @@ function markQueuedUploadShotFailed(file, errorMessage) {
 
 const activeUploadJobs = new Set();
 
-function queueUploadedShotAnalysis(file, body) {
-  const queuedShot = buildQueuedUploadShot(file, body);
+function queueUploadedShotAnalysis(file, body, freshJobId = false) {
+  const queuedShot = buildQueuedUploadShot(file, body, freshJobId);
   activeUploadJobs.add(queuedShot.jobId);
   setImmediate(() => {
-    analyzeAndStoreUploadedShot(file, body)
+    analyzeAndStoreUploadedShot(file, body, freshJobId ? queuedShot.jobId : null)
       .catch((err) => {
         console.error('queued upload analysis failed', err);
         try {
@@ -2576,7 +2583,7 @@ function queueUploadedShotAnalysis(file, body) {
   return queuedShot;
 }
 
-async function analyzeAndStoreUploadedShot(file, body) {
+async function analyzeAndStoreUploadedShot(file, body, retryJobId = null) {
   const existing = shotStore.getShotByMediaName(file.filename);
   const sourceType = body.sourceType || existing?.sourceType || 'upload';
   const force = toBoolean(body.force);
@@ -2595,6 +2602,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
         { sourceType },
       );
   const meta = {
+    ...existing?.metadata,
     club: body.club,
     viewpoint: body.viewpoint || existing?.metadata?.viewpoint || 'unknown',
     handedness: body.handedness || existing?.metadata?.handedness || 'unknown',
@@ -2609,6 +2617,9 @@ async function analyzeAndStoreUploadedShot(file, body) {
     track_frames: toNumberOrUndefined(body.track_frames),
     sourceType,
   };
+  delete meta.metaPath;
+  delete meta.bodyPath;
+  delete meta.analysisInput;
   const explicitMetaPath =
     typeof body.metaPath === 'string' && body.metaPath.trim().length > 0
       ? resolveMetaPath(body.metaPath, jobId)
@@ -2626,6 +2637,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
       sourceType,
       createdAt: existing?.createdAt || new Date().toISOString(),
       media: {
+        ...existing?.media,
         filename: file.filename,
         path: file.path,
         size: file.size,
@@ -2749,7 +2761,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
 
   updateProgress('video_preparing');
   createPendingShot();
-  const prepared = await prepareVideoForAnalysis(file.path, file.filename);
+  const prepared = await prepareVideoForAnalysis(file.path, file.filename, retryJobId);
   if (prepared.ok === false) {
     updateProgress('failed', {
       analysisPath: 'opencv',
@@ -2779,6 +2791,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
       sourceType,
       createdAt: existing?.createdAt || new Date().toISOString(),
       media: {
+        ...existing?.media,
         filename: file.filename,
         path: file.path,
         size: file.size,
@@ -3011,6 +3024,7 @@ async function analyzeAndStoreUploadedShot(file, body) {
     sourceType,
     createdAt: existing?.createdAt || new Date().toISOString(),
     media: {
+      ...existing?.media,
       filename: file.filename,
       path: file.path,
       size: file.size,
@@ -3059,6 +3073,7 @@ const analyzeUploadHandler = async (req, res) => {
       ok: false,
       message: err.message || 'Analysis failed',
       errorMessage: err.message || 'Analysis failed',
+      errorCode: err.code === 'SHOT_STORE_UNAVAILABLE' ? err.code : undefined,
     });
   }
 };
@@ -3121,6 +3136,84 @@ app.post('/api/analyze', upload.single('video'), async (req, res) => {
       ok: false,
       error: err.message || 'Analysis failed',
       errorMessage: err.message || 'Analysis failed',
+      errorCode: err.code === 'SHOT_STORE_UNAVAILABLE' ? err.code : undefined,
+    });
+  }
+});
+
+// Analyze an already stored upload without creating another copy of the video.
+app.post('/api/analyze/existing-upload', (req, res) => {
+  const filename = req.body?.filename;
+  if (typeof filename !== 'string' || path.basename(filename) !== filename || filename.includes('\\') || filename.includes('\0')
+      || Buffer.byteLength(filename) > 255 || !isSupportedVideoExt(filename)) {
+    return res.status(400).json({ ok: false, message: '영상 파일 이름을 확인해 주세요.' });
+  }
+  const inputPath = resolveUploadPath(filename);
+  if (!inputPath) return res.status(400).json({ ok: false, message: '영상 파일 이름을 확인해 주세요.' });
+  const options = req.body?.options ?? {};
+  if (typeof options !== 'object' || Array.isArray(options)
+      || (options.club != null && (typeof options.club !== 'string' || options.club.length > 80))
+      || (options.viewpoint != null && !['down_the_line', 'face_on', 'unknown'].includes(options.viewpoint))
+      || (options.handedness != null && !['right', 'left', 'unknown'].includes(options.handedness))
+      || (options.force != null && typeof options.force !== 'boolean')) {
+    return res.status(400).json({ ok: false, message: '분석 설정을 확인해 주세요.' });
+  }
+  try {
+    let stat;
+    try { stat = fs.lstatSync(inputPath); }
+    catch (error) {
+      if (error.code === 'ENOENT') return res.status(404).json({ ok: false, message: '저장된 영상을 찾을 수 없습니다.' });
+      throw error;
+    }
+    if (!stat.isFile() || stat.size === 0) return res.status(400).json({ ok: false, message: '저장된 영상을 읽을 수 없습니다.' });
+    const matchingShots = shotStore.listShots().filter((shot) => shot.media?.filename === filename);
+    if (matchingShots.length > 1) {
+      return res.status(409).json({ ok: false, message: '같은 영상에 연결된 기록이 여러 개여서 재분석을 보류했습니다.' });
+    }
+    const previous = matchingShots[0];
+    if (previous?.sourceType === 'camera' || previous?.metadata?.sourceType === 'camera') {
+      return res.status(409).json({ ok: false, message: '카메라 영상은 카메라 기록에서 분석해 주세요.' });
+    }
+    if (previous?.jobId && activeUploadJobs.has(previous.jobId)) {
+      return res.json({ ok: true, jobId: previous.jobId, filename, status: 'queued' });
+    }
+    const oldJobId = previous?.jobId || path.basename(filename, path.extname(filename));
+    if (!isSafeJobId(oldJobId) || oldJobId.includes('\0')) return res.status(409).json({ ok: false, message: '기존 기록의 식별 정보를 확인해 주세요.' });
+    const cache = readAnalysisCache(oldJobId);
+    const cacheStatus = ['pending', 'queued', 'running', 'done', 'failed'].includes(cache?.status)
+      ? mapCacheStatusToFileStatus(cache.status) : normalizeJobStatus(cache?.status);
+    const status = cacheStatus || normalizeJobStatus(previous?.status);
+    if (status === 'succeeded') return res.status(409).json({ ok: false, message: '이미 분석된 영상입니다. 기록에서 결과를 확인해 주세요.' });
+    if (status === 'queued' || status === 'running') return res.status(409).json({ ok: false, message: '이 영상의 분석이 진행 중입니다. 잠시 후 다시 확인해 주세요.' });
+    try {
+      fs.lstatSync(path.join(swingTrackingAnnotations.annotationDir, `${oldJobId}.json`));
+      return res.status(409).json({ ok: false, message: '기존 라벨과 영상의 연결을 보존하기 위해 이 영상의 재분석을 보류했습니다.' });
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    if (previous) {
+      const backupDir = path.join(dataDir, 'shot-retry-snapshots');
+      fs.mkdirSync(backupDir, { recursive: true });
+      fs.writeFileSync(path.join(backupDir, `${randomUUID()}.json`), JSON.stringify(previous), { flag: 'wx', mode: 0o600 });
+    }
+    const priorMeta = previous?.metadata || {};
+    const shot = queueUploadedShotAnalysis({ filename, path: inputPath, size: stat.size }, {
+      club: options.club ?? priorMeta.club,
+      viewpoint: options.viewpoint ?? priorMeta.viewpoint,
+      handedness: options.handedness ?? priorMeta.handedness,
+      fps: priorMeta.fps ?? undefined, cameraConfig: priorMeta.cameraConfig, roi: priorMeta.roi,
+      cam_distance: priorMeta.cam_distance ?? undefined, cam_height: priorMeta.cam_height ?? undefined,
+      h_fov: priorMeta.h_fov ?? undefined, v_fov: priorMeta.v_fov ?? undefined,
+      impact_frame: priorMeta.impact_frame ?? undefined, track_frames: priorMeta.track_frames ?? undefined,
+      force: options.force === true,
+    }, true);
+    return res.json({ ok: true, jobId: shot.jobId, filename, status: shot.status });
+  } catch (error) {
+    console.error('existing upload analysis failed', error);
+    return res.status(500).json({
+      ok: false,
+      message: error.code === 'SHOT_STORE_UNAVAILABLE' ? error.message : '저장된 영상의 분석을 시작하지 못했습니다. 기록과 서버 상태를 확인해 주세요.',
+      errorCode: error.code === 'SHOT_STORE_UNAVAILABLE' ? error.code : undefined,
     });
   }
 });
@@ -3180,6 +3273,10 @@ app.post('/api/analyze/from-file', async (req, res) => {
   const resolvedMetaPath = resolveMetaPath(metaPathInput, providedJobId);
   if (!resolvedMetaPath) {
     return res.status(400).json({ ok: false, message: 'Invalid meta path' });
+  }
+  const linkedShot = shotStore.getShotByMediaName(targetFilename);
+  if (linkedShot?.jobId && linkedShot.jobId !== providedJobId) {
+    return res.status(409).json({ ok: false, message: '영상에 연결된 기존 분석 기록이 달라 요청을 보류했습니다.' });
   }
   let progress = buildGroupedProgress('club_ready', {
     analysisPath: 'infer',
@@ -4040,6 +4137,7 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
       ok: false,
       message: err.message || 'Analysis failed',
       errorMessage: err.message || 'Analysis failed',
+      errorCode: err.code === 'SHOT_STORE_UNAVAILABLE' ? err.code : undefined,
     });
   }
 });
@@ -4051,7 +4149,7 @@ app.get('/api/files', (_req, res) => {
     const entries = shots.map(mapShotToFileEntry);
     res.json(entries);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message, errorCode: err.code === 'SHOT_STORE_UNAVAILABLE' ? err.code : undefined });
   }
 });
 
@@ -4116,12 +4214,13 @@ app.get('/api/files/detail', async (req, res) => {
           thumbnailUrl: localThumbnailUrl(cacheJobId),
           shotId: shot?.id || null,
           jobId: shot?.jobId || cached?.jobId || derivedJobId,
+          sourceType: shot?.sourceType || shot?.metadata?.sourceType || null,
           analyzed: effectiveStatus === 'succeeded',
           status: effectiveStatus,
           errorCode,
           errorMessage,
           nasArchive: cached?.nasArchive ? { ...cached.nasArchive, artifacts: undefined } : null,
-          metaPath: cached?.metaPath || null,
+          metaPath: cached?.metaPath || shot?.metadata?.metaPath || null,
           size: stats?.size,
           modifiedAt: stats?.mtime?.toISOString(),
           analysis: effectiveAnalysis,
@@ -4132,7 +4231,7 @@ app.get('/api/files/detail', async (req, res) => {
 
     res.json({ ok: true, files: filesWithStatus });
   } catch (err) {
-    res.status(500).json({ ok: false, message: err.message });
+    res.status(500).json({ ok: false, message: err.message, errorCode: err.code === 'SHOT_STORE_UNAVAILABLE' ? err.code : undefined });
   }
 });
 

@@ -24,7 +24,7 @@ try {
   const original = fs.readFileSync(file);
   const rename = fs.renameSync;
   fs.renameSync = (...args) => { if (args[1] === fs.realpathSync(file)) throw Object.assign(new Error('rename failed'), {code:'EIO'}); return rename(...args); };
-  try { assert.throws(() => store.addShot({id:'new',sessionId:'session'}), /rename failed/); }
+  try { assert.throws(() => store.addShot({id:'new',sessionId:'session'}), error => error.code === 'SHOT_STORE_UNAVAILABLE' && error.cause?.message === 'rename failed'); }
   finally { fs.renameSync = rename; }
   assert.deepEqual(fs.readFileSync(file), original, 'failed replacement must preserve the old record');
   assert.deepEqual(fs.readdirSync(dir), ['shots.json'], 'failed replacement must clean its temporary file');
@@ -37,23 +37,27 @@ try {
     }
     return write(name, ...args);
   };
-  try { assert.throws(() => store.addShot({id:'new',sessionId:'session'}), /write failed/); }
+  try { assert.throws(() => store.addShot({id:'new',sessionId:'session'}), error => error.code === 'SHOT_STORE_UNAVAILABLE' && error.cause?.message === 'write failed'); }
   finally { fs.writeFileSync = write; }
   assert.deepEqual(fs.readFileSync(file), original, 'interrupted temporary write must preserve the old record');
   assert.deepEqual(fs.readdirSync(dir), ['shots.json']);
 
   for (const corrupted of ['', '{broken']) {
     fs.writeFileSync(file, corrupted);
-    assert.throws(() => store.addShot({id:'new',sessionId:'session'}), SyntaxError);
+    assert.throws(() => store.addShot({id:'new',sessionId:'session'}), error =>
+      error.code === 'SHOT_STORE_UNAVAILABLE' && error.cause instanceof SyntaxError && /영상은 이미 저장됐을 수/.test(error.message));
     assert.equal(fs.readFileSync(file, 'utf8'), corrupted, 'invalid JSON must not be replaced by an empty store');
   }
+  fs.writeFileSync(file, '{"sessions":[],"shots":null}');
+  assert.throws(() => store.addShot({id:'new',sessionId:'session'}), error => error.code === 'SHOT_STORE_UNAVAILABLE');
+  assert.equal(fs.readFileSync(file, 'utf8'), '{"sessions":[],"shots":null}', 'invalid structure must remain untouched');
   fs.writeFileSync(file, JSON.stringify(seed));
   store.addShot({id:'new',sessionId:'session'});
   assert.deepEqual(store.listShots().map(s => s.id), ['existing','new']);
   assert.equal(fs.statSync(file).mode & 0o777, 0o640, 'existing permissions must be preserved');
   if (process.getuid?.() !== 0) {
     fs.chmodSync(file, 0o400);
-    assert.throws(() => store.addShot({id:'forbidden',sessionId:'session'}), {code:'EACCES'});
+    assert.throws(() => store.addShot({id:'forbidden',sessionId:'session'}), error => error.code === 'SHOT_STORE_UNAVAILABLE' && error.cause?.code === 'EACCES');
     assert.deepEqual(store.listShots().map(s => s.id), ['existing','new'], 'read-only records must not be replaced');
   }
 
@@ -67,8 +71,8 @@ try {
   const brokenDir = path.join(root, 'dangling'); fs.mkdirSync(brokenDir);
   const dangling = path.join(brokenDir, 'shots.json'); fs.symlinkSync(path.join(root, 'absent.json'), dangling);
   const brokenStore = load(brokenDir);
-  assert.throws(() => brokenStore.listShots(), {code:'ENOENT'});
-  assert.throws(() => brokenStore.saveStore(seed), {code:'ENOENT'});
+  assert.throws(() => brokenStore.listShots(), error => error.code === 'SHOT_STORE_UNAVAILABLE' && error.cause?.code === 'ENOENT');
+  assert.throws(() => brokenStore.saveStore(seed), error => error.code === 'SHOT_STORE_UNAVAILABLE' && error.cause?.code === 'ENOENT');
   assert.equal(fs.lstatSync(dangling).isSymbolicLink(), true);
 
   const server = fs.readFileSync(new URL('../server.js', import.meta.url), 'utf8');
