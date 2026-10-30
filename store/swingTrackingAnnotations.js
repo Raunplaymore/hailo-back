@@ -133,6 +133,8 @@ function sanitizeAnnotation(jobId, input) {
 
 function createSwingTrackingAnnotationStore({ dataDir }) {
   const annotationDir = path.join(dataDir, 'annotations', 'swing-tracking');
+  // shortcut: this queue protects one store instance; use a shared lock if multiple writers are introduced.
+  const pendingSaves = new Map();
   fs.mkdirSync(annotationDir, { recursive: true });
 
   function annotationPath(jobId) {
@@ -148,16 +150,36 @@ function createSwingTrackingAnnotationStore({ dataDir }) {
     }
   }
 
-  async function save(jobId, input) {
-    const annotation = {
-      ...sanitizeAnnotation(jobId, input),
-      updatedAt: new Date().toISOString(),
-    };
-    const targetPath = annotationPath(jobId);
-    const temporaryPath = `${targetPath}.${process.pid}.tmp`;
-    await fs.promises.writeFile(temporaryPath, `${JSON.stringify(annotation, null, 2)}\n`, 'utf8');
-    await fs.promises.rename(temporaryPath, targetPath);
-    return annotation;
+  function save(jobId, input) {
+    const previous = pendingSaves.get(jobId) || Promise.resolve();
+    const work = previous.catch(() => undefined).then(async () => {
+      const current = await load(jobId);
+      const currentVersion = typeof current?.updatedAt === 'string' ? current.updatedAt : null;
+      const submittedVersion = typeof input?.updatedAt === 'string' ? input.updatedAt : null;
+      const invalidVersion = (current?.updatedAt != null && typeof current.updatedAt !== 'string')
+        || (input?.updatedAt != null && typeof input.updatedAt !== 'string');
+      const normalized = sanitizeAnnotation(jobId, input);
+      if (invalidVersion || currentVersion !== submittedVersion) {
+        // Identical content can be a retry after the save response was lost.
+        if (!invalidVersion && current && JSON.stringify(normalized) === JSON.stringify(sanitizeAnnotation(jobId, current))) return current;
+        const error = new Error('저장된 라벨이 변경되어 저장하지 못했습니다. 다른 화면에서 저장했거나 이전 저장 응답이 끊겼을 수 있어요. 현재 편집 내용은 이 화면에 남아 있으니 기록한 후 최신 라벨을 불러와 주세요.');
+        error.code = 'ANNOTATION_CHANGED';
+        throw error;
+      }
+      const previousTime = Date.parse(currentVersion || '');
+      // The timestamp is also the version and must advance even within one millisecond.
+      const updatedAt = new Date(Math.max(Date.now(), Number.isFinite(previousTime) ? previousTime + 1 : 0)).toISOString();
+      const annotation = { ...normalized, updatedAt };
+      const targetPath = annotationPath(jobId);
+      const temporaryPath = `${targetPath}.${process.pid}.tmp`;
+      await fs.promises.writeFile(temporaryPath, `${JSON.stringify(annotation, null, 2)}\n`, 'utf8');
+      await fs.promises.rename(temporaryPath, targetPath);
+      return annotation;
+    });
+    pendingSaves.set(jobId, work);
+    const clear = () => { if (pendingSaves.get(jobId) === work) pendingSaves.delete(jobId); };
+    void work.then(clear, clear);
+    return work;
   }
 
   async function list() {

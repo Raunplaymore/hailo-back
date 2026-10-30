@@ -4586,6 +4586,9 @@ app.post('/api/debug/infer/:jobId/annotation', async (req, res) => {
       archive,
     });
   } catch (error) {
+    if (error.code === 'ANNOTATION_CHANGED') {
+      return res.status(409).json({ ok: false, jobId, code: error.code, message: error.message });
+    }
     return res.status(500).json({ ok: false, jobId, message: error.message });
   }
 });

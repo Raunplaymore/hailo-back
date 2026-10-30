@@ -44,6 +44,19 @@ try {
     stdio: ['ignore', 'pipe', 'pipe'] });
   backend.stdout.on('data', value => { logs += value; }); backend.stderr.on('data', value => { logs += value; });
   await waitFor(async () => { if (backend.exitCode !== null) throw new Error(`backend exited: ${logs}`); try { return (await fetch(`${base}/api/files`)).ok; } catch { return false; } });
+  const annotationUrl = `${base}/api/debug/infer/label-race/annotation`;
+  const saveAnnotation = annotation => fetch(annotationUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(annotation) });
+  const initialAnnotation = (await (await saveAnnotation({ jobId: 'label-race', notes: 'initial' })).json()).annotation;
+  const firstSave = await saveAnnotation({ ...initialAnnotation, notes: 'first' });
+  assert.equal(firstSave.status, 200);
+  const firstSavedAnnotation = (await firstSave.json()).annotation;
+  const retrySave = await saveAnnotation({ ...initialAnnotation, notes: 'first' });
+  assert.equal(retrySave.status, 200, 'retrying the same saved content must succeed');
+  assert.equal((await retrySave.json()).annotation.updatedAt, firstSavedAnnotation.updatedAt);
+  const staleSave = await saveAnnotation({ ...initialAnnotation, notes: 'stale' });
+  assert.equal(staleSave.status, 409, 'stale annotation writes must report a conflict');
+  assert.equal((await staleSave.json()).code, 'ANNOTATION_CHANGED');
+  assert.equal((await (await fetch(annotationUrl)).json()).annotation.notes, 'first');
   const post = (filename, options = {}) => fetch(`${base}/api/analyze/existing-upload`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename, options }) });
   for (const bad of ['../outside.mp4', 'folder/video.mp4', '\\outside.mp4', 'bad\0.mp4', 'x'.repeat(256) + '.mp4', 'bad.txt']) assert.equal((await post(bad)).status, 400);
   for (const bad of [{viewpoint:'diagonal'}, {handedness:'sideways'}, {force:'true'}, {club:{}}, []]) {

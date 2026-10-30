@@ -80,6 +80,47 @@ try {
   assert.equal(listed[0].jobId, jobId);
   assert.equal(listed[0].labeledFrames, 1);
   assert.equal(listed[0].events, 1);
+
+  const firstEdit = await store.save(jobId, { ...loaded, notes: 'first edit' });
+  const retry = await store.save(jobId, { ...loaded, notes: 'first edit' });
+  assert.equal(retry.updatedAt, firstEdit.updatedAt, 'an identical retry must return the already saved version');
+  await assert.rejects(store.save(jobId, { ...loaded, notes: 'stale edit' }), { code: 'ANNOTATION_CHANGED' });
+  assert.equal((await store.load(jobId)).notes, 'first edit', 'stale edits must not overwrite a saved label');
+
+  const concurrent = await Promise.allSettled([
+    store.save(jobId, { ...firstEdit, notes: 'parallel A' }),
+    store.save(jobId, { ...firstEdit, notes: 'parallel B' }),
+  ]);
+  assert.equal(concurrent.filter(result => result.status === 'fulfilled').length, 1);
+  const rejected = concurrent.find(result => result.status === 'rejected');
+  assert.equal(rejected.reason.code, 'ANNOTATION_CHANGED');
+  const winner = concurrent.find(result => result.status === 'fulfilled').value;
+  assert.equal((await store.load(jobId)).notes, winner.notes, 'parallel saves must not corrupt or overwrite the winner');
+
+  const oldNow = Date.now;
+  Date.now = () => Date.parse(winner.updatedAt);
+  try {
+    const next = await store.save(jobId, { ...winner, notes: 'same millisecond' });
+    assert.ok(Date.parse(next.updatedAt) > Date.parse(winner.updatedAt), 'each successful save needs a new version');
+    await assert.rejects(store.save(jobId, winner), { code: 'ANNOTATION_CHANGED' });
+  } finally {
+    Date.now = oldNow;
+  }
+
+  const legacyId = 'legacy';
+  await fs.writeFile(path.join(store.annotationDir, `${legacyId}.json`), JSON.stringify({ jobId: legacyId, frames: [], notes: 'old' }));
+  const legacy = await store.load(legacyId);
+  const migrated = await store.save(legacyId, { ...legacy, notes: 'preserved' });
+  assert.equal(migrated.notes, 'preserved', 'a legacy label without a timestamp remains editable');
+  assert.ok(migrated.updatedAt);
+  await assert.rejects(store.save(legacyId, { ...migrated, updatedAt: 123 }), { code: 'ANNOTATION_CHANGED' });
+  assert.equal((await store.load(legacyId)).notes, 'preserved', 'invalid version tokens must not overwrite labels');
+  await assert.rejects(store.save('deleted', { updatedAt: migrated.updatedAt }), { code: 'ANNOTATION_CHANGED' });
+  assert.equal(await store.load('deleted'), null, 'a stale client must not recreate a deleted label');
+  const corruptPath = path.join(store.annotationDir, 'corrupt.json');
+  await fs.writeFile(corruptPath, '{invalid');
+  await assert.rejects(store.save('corrupt', { notes: 'overwrite' }), SyntaxError);
+  assert.equal(await fs.readFile(corruptPath, 'utf8'), '{invalid', 'an unreadable label must not be overwritten');
 } finally {
   await fs.rm(tempDir, { recursive: true, force: true });
 }
