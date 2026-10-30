@@ -4036,10 +4036,10 @@ app.post('/api/analyze/:jobId/practice-review', async (req, res) => {
   }
   try {
     const response = await inferFetchJson(inferUrl(coaching ? '/v1/coaching-review' : preview ? '/v1/practice-preview' : '/v1/practice-review'), {
-      method: 'POST', timeoutMs: coaching ? 30000 : 10000,
+      method: 'POST', timeoutMs: coaching ? 55000 : 10000,
       body: { jobId, inputPath, bodyPath, addressMs, comparisonMs: effectiveComparisonMs, viewpoint, ...(preview ? { impactMs } : { confirmedFrames }) },
     });
-    if (!response.ok) return res.status(!response.status || response.status >= 500 ? 502 : response.status === 409 ? 409 : 422).json({ ok: false, error: typeof response.json?.detail === 'string' ? response.json.detail : '자세 비교를 완료하지 못했습니다.' });
+    if (!response.ok) return res.status(!response.status || response.status >= 500 ? 502 : response.status === 409 ? 409 : 422).json({ ok: false, error: coaching && response.error?.name === 'AbortError' ? '골반 관찰 준비에 시간이 오래 걸리고 있어요. 잠시 후 다시 시도해 주세요.' : typeof response.json?.detail === 'string' ? response.json.detail : '자세 비교를 완료하지 못했습니다.' });
     if (cached && (!fs.existsSync(inputPath) || !matchesVideoIdentity(cached, fs.statSync(inputPath)))) {
       return res.status(409).json({ ok: false, error: '영상이 변경됐습니다. 새로고침 후 장면을 다시 선택해 주세요.' });
     }
