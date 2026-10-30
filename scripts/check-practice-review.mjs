@@ -5,17 +5,17 @@ import cacheModule from '../store/impactReviewCache.js';
 const source=readFileSync(new URL('../server.js',import.meta.url),'utf8');
 const route=source.slice(source.indexOf("app.post('/api/analyze/:jobId/practice-review'"),source.indexOf("app.get('/api/analyze/:jobId',"));
 let fileSize=100, fileChange=40, analysisCache=null, timingRevision=3, frameTimes=[0,100,250,400,550,700];
-let changeDuringInference=false;
+let changeDuringInference=false, bodyCurrent=true, changeBodyDuringInference=false;
 let handler, upstream={ok:true,json:{ok:true,status:'withheld'}}, calls=[];
 const shot={status:'done',metadata:{analysisInput:{path:'/uploads/original.mp4'}}};
 vm.runInNewContext(route,{
  app:{post:(_path,fn)=>handler=fn}, fs:{existsSync:()=>true,statSync:()=>({dev:1,ino:7,size:fileSize,mtimeMs:20,ctimeMs:fileChange})}, matchesVideoIdentity:cacheModule.matchesVideoIdentity,
  shotStore:{getShotByJobId:id=>id==='known'?shot:null},
- impactReviews:{read:()=>({inputPath:'/uploads/converted.mp4',dev:1,ino:7,size:100,mtimeMs:20,ctimeMs:40,result:{timingRevision,videoSha256:'a'.repeat(64),frameTimesMs:frameTimes,candidate:{timeMs:550}}})},
- resolveReviewReference:()=>({inputPath:'/uploads/converted.mp4',dev:1,ino:7,size:100,mtimeMs:20,ctimeMs:40,result:{timingRevision,videoSha256:'a'.repeat(64),frameTimesMs:frameTimes,candidate:{timeMs:550}}}),
+ impactReviews:{readCurrent:()=>bodyCurrent?{result:{videoSha256:'a'.repeat(64),candidate:{frameIndex:4,timeMs:550}}}:null},
+ resolveReviewReference:()=>({inputPath:'/uploads/converted.mp4',dev:1,ino:7,size:100,mtimeMs:20,ctimeMs:40,result:{timingRevision,videoSha256:'a'.repeat(64),frameTimesMs:frameTimes,candidate:{frameIndex:4,timeMs:550}}}),
  readAnalysisCache:()=>analysisCache,
  bodyArtifactPath:id=>`/data/body/${id}.json`,inferUrl:p=>p,
- inferFetchJson:async(url,options)=>{calls.push({url,...options});if(changeDuringInference)fileChange=41;return upstream;},
+ inferFetchJson:async(url,options)=>{calls.push({url,...options});if(changeDuringInference)fileChange=41;if(changeBodyDuringInference)bodyCurrent=false;return upstream;},
 });
 const valid={addressMs:100,comparisonMs:500,viewpoint:'down_the_line',confirmedFrames:true};
 async function request(body=valid,id='known'){
@@ -48,12 +48,27 @@ await request({...valid,mode:'coaching',confirmedFrames:false,videoSha256:'a'.re
 assert.equal(calls.at(-1).url,'/v1/coaching-review');
 assert.equal(calls.at(-1).body.impactMs,550,'coaching also uses only the stored candidate');
 assert.equal(calls.at(-1).body.confirmedFrames,undefined);
+upstream={ok:true,json:{ok:true,status:'withheld'}};
+bodyCurrent=false;
+const beforeStaleBody=calls.length;
+assert.equal((await request({...valid,mode:'coaching',videoSha256:'a'.repeat(64)})).statusCode,409,'outdated pose cannot use an automatic candidate');
+assert.equal((await request({...valid,mode:'preview',videoSha256:'a'.repeat(64)})).statusCode,409,'preview cannot use an outdated automatic candidate');
+assert.equal(calls.length,beforeStaleBody,'outdated pose must be rejected before inference');
+bodyCurrent=true;changeBodyDuringInference=true;
+assert.equal((await request({...valid,mode:'coaching',videoSha256:'a'.repeat(64)})).statusCode,409,'pose changed during coaching must not be returned');
+changeBodyDuringInference=false;bodyCurrent=true;
+frameTimes=[0,100,250,400,551,700];
+assert.equal((await request({...valid,mode:'coaching',videoSha256:'a'.repeat(64)})).statusCode,409,'automatic candidate must match its frame time');
+frameTimes=[0,100,250,400,550,700];
 const selected={...valid,mode:'coaching',confirmedFrames:false,videoSha256:'a'.repeat(64),impactFrameIndex:5,comparisonMs:620};
 upstream={ok:true,json:{ok:true,status:'withheld'}};
 assert.equal((await request(selected)).statusCode,200);
 assert.equal(calls.at(-1).body.impactMs,700,'selected frame time must come from the verified video cache');
 assert.equal(calls.at(-1).body.comparisonMs,620);
 assert.equal(calls.at(-1).body.impactFrameIndex,undefined,'frame selection is not forwarded as a label');
+bodyCurrent=false;
+assert.equal((await request(selected)).statusCode,200,'a manually selected impact does not depend on the old automatic candidate');
+bodyCurrent=true;
 for(const index of [-1,1.5,'5',null,6,99999]) assert.equal((await request({...selected,impactFrameIndex:index})).statusCode,400);
 assert.equal((await request({...selected,mode:'preview'})).statusCode,400);
 assert.equal((await request({...selected,comparisonMs:621.1})).statusCode,400);

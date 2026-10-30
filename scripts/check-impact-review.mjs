@@ -74,6 +74,39 @@ try {
   const retry=cacheModule.createImpactReviewCache({dataDir:join(root,'retry'),run:async(id)=>{if(id==='bad')throw Error('failed');return result(id);}});
   await assert.rejects(retry.schedule('bad',video));
   assert.equal((await retry.schedule('good',video)).jobId,'good','failed job must not poison later queued jobs');
+
+  const pose=join(root,'pose.json'), poseReplacement=join(root,'pose-replacement.json');
+  await writeFile(pose,JSON.stringify({impact:800})); let poseRuns=0;
+  const poseCache=cacheModule.createImpactReviewCache({dataDir:join(root,'pose-cache'),run:async(id,_video,body)=>{
+    poseRuns++; return {...result(id),candidate:{timeMs:JSON.parse(await readFile(body,'utf8')).impact}};
+  }});
+  assert.equal((await poseCache.schedule('pose',video,pose)).candidate.timeMs,800);
+  assert.ok(poseCache.readCurrent('pose',pose),'unchanged body keeps a reusable result');
+  await writeFile(poseReplacement,JSON.stringify({impact:1600}));await rename(poseReplacement,pose);
+  assert.equal(poseCache.readCurrent('pose',pose),null,'replaced body makes the candidate stale');
+  assert.equal((await poseCache.schedule('pose',video,pose)).candidate.timeMs,1600);
+  assert.equal(poseRuns,2,'changed body requires a new candidate');
+  const poseFile=join(root,'pose-cache','impact-review-results','pose.json');
+  const legacyPose=JSON.parse(await readFile(poseFile,'utf8'));delete legacyPose.bodyIdentity;
+  await writeFile(poseFile,JSON.stringify(legacyPose));
+  assert.equal(poseCache.readCurrent('pose',pose),null,'legacy candidate without body provenance is not current');
+  await poseCache.schedule('pose',video,pose);assert.equal(poseRuns,3,'legacy candidate is recalculated once');
+  let arrivalRuns=0;
+  const arrival=cacheModule.createImpactReviewCache({dataDir:join(root,'arrival'),run:async(id)=>{arrivalRuns++;return result(id);}});
+  await arrival.schedule('arrival',video,null);
+  assert.ok(arrival.readCurrent('arrival',null));
+  assert.equal(arrival.readCurrent('arrival',pose),null,'an available pose invalidates a candidate made without one');
+  await arrival.schedule('arrival',video,pose);
+  assert.equal(arrivalRuns,2,'newly available pose triggers recalculation');
+  let bodyStarted, releaseBody;
+  const startedBody=new Promise(resolve=>{bodyStarted=resolve;}), bodyGate=new Promise(resolve=>{releaseBody=resolve;});
+  const bodyRace=cacheModule.createImpactReviewCache({dataDir:join(root,'body-race'),run:async(id)=>{
+    bodyStarted();await bodyGate;return result(id);
+  }});
+  const racingBody=bodyRace.schedule('pose-race',video,pose);await startedBody;
+  await writeFile(poseReplacement,JSON.stringify({impact:2000}));await rename(poseReplacement,pose);releaseBody();
+  await assert.rejects(racingBody,/Body input changed during impact analysis/);
+  assert.equal(bodyRace.read('pose-race'),null,'a body changed in flight cannot save a candidate');
   assert.equal((await readFile(video,'utf8')),'changed source video');
 } finally { await rm(root,{recursive:true,force:true}); }
 let registration;

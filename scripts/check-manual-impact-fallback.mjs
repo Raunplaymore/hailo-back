@@ -12,7 +12,7 @@ const video=path.join(root,'video.mp4'),body=path.join(root,'body.json');
 fs.writeFileSync(video,'original-video');fs.writeFileSync(body,'{}');
 const digest='a'.repeat(64), times=[0,100,250,400,550,700];
 const manualVideoClocks=createVideoClock({probe:async()=>({times,frameCount:times.length}),hash:async()=>digest});
-let automatic=null;const impactReviews={read:()=>automatic};
+let automatic=null;const impactReviews={read:()=>automatic,readCurrent:()=>automatic};
 const app=express();app.use(express.json());const calls=[];
 const shot={status:'done',metadata:{analysisInput:{path:video},bodyPath:body}};let shotExists=true;
 const shotStore={getShotByJobId:id=>id==='job'&&shotExists?shot:null};
@@ -47,7 +47,7 @@ try {
   assert.equal((await post({...input,impactFrameIndex:999})).status,400);
   const stat=fs.statSync(video);
   automatic={inputPath:video,dev:stat.dev,ino:stat.ino,size:stat.size,mtimeMs:stat.mtimeMs,ctimeMs:stat.ctimeMs,
-    result:{videoSha256:digest,timingRevision:3,frameTimesMs:times,candidate:{timeMs:550}}};
+    result:{videoSha256:digest,timingRevision:3,frameTimesMs:times,candidate:{frameIndex:4,timeMs:550}}};
   assert.equal((await post({...input,impactFrameIndex:undefined,comparisonMs:470})).status,200);
   assert.equal(calls.at(-1).body.impactMs,550,'a valid automatic candidate retains its existing behavior');
   const reassigned=path.join(root,'reassigned.mp4');fs.writeFileSync(reassigned,'new association');

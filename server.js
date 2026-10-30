@@ -4001,6 +4001,20 @@ app.post('/api/analyze/:jobId/practice-review', async (req, res) => {
     }
     effectiveComparisonMs = impactMs - 80;
   }
+  const automaticImpactCurrent = () => {
+    try {
+      const current = impactReviews.readCurrent(jobId, fs.existsSync(bodyPath) ? bodyPath : null);
+      const frame = cached?.result?.candidate?.frameIndex;
+      const times = cached?.result?.frameTimesMs;
+      return Number.isSafeInteger(frame) && frame >= 0 && Array.isArray(times) && frame < times.length && times[frame] === impactMs
+        && current?.result?.videoSha256 === videoSha256
+        && current.result.candidate?.frameIndex === frame && current.result.candidate?.timeMs === impactMs;
+    } catch { return false; }
+  };
+  const usesAutomaticImpact = (coaching && impactFrameIndex === undefined) || (mode === 'preview' && Boolean(videoSha256));
+  if (usesAutomaticImpact && !automaticImpactCurrent()) {
+    return res.status(409).json({ ok: false, error: '자세 분석과 임팩트 후보의 연결을 확인하지 못했습니다. 새로고침 후 다시 확인해 주세요.' });
+  }
   try {
     const response = await inferFetchJson(inferUrl(coaching ? '/v1/coaching-review' : preview ? '/v1/practice-preview' : '/v1/practice-review'), {
       method: 'POST', timeoutMs: coaching ? 30000 : 10000,
@@ -4009,6 +4023,9 @@ app.post('/api/analyze/:jobId/practice-review', async (req, res) => {
     if (!response.ok) return res.status(!response.status || response.status >= 500 ? 502 : response.status === 409 ? 409 : 422).json({ ok: false, error: typeof response.json?.detail === 'string' ? response.json.detail : '자세 비교를 완료하지 못했습니다.' });
     if (cached && (!fs.existsSync(inputPath) || !matchesVideoIdentity(cached, fs.statSync(inputPath)))) {
       return res.status(409).json({ ok: false, error: '영상이 변경됐습니다. 새로고침 후 장면을 다시 선택해 주세요.' });
+    }
+    if (usesAutomaticImpact && !automaticImpactCurrent()) {
+      return res.status(409).json({ ok: false, error: '자세 분석과 임팩트 후보의 연결을 확인하지 못했습니다. 새로고침 후 다시 확인해 주세요.' });
     }
     return res.json(response.json);
   } catch (error) {
