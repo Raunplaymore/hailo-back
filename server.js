@@ -2209,7 +2209,10 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false, refresh = false 
     let impact = null;
     try {
       impact = await scheduleAutomaticImpact(jobId, inputPath, hasBody ? bodyPath : null);
-      if (!Number.isFinite(impact?.candidate?.timeMs)) throw new Error('Invalid impact candidate');
+      const frame = impact?.candidate?.frameIndex;
+      if (!/^[a-f0-9]{64}$/.test(impact?.videoSha256 ?? '') || !Number.isSafeInteger(frame) || frame < 0
+        || !Array.isArray(impact.frameTimesMs) || impact.frameTimesMs[frame] !== impact.candidate.timeMs
+        || !Number.isFinite(impact.candidate.timeMs)) throw new Error('Invalid impact candidate');
     }
     catch (error) {
       impact = null;
@@ -2235,12 +2238,28 @@ function scheduleDtlClubPointsV2Sidecar(jobId, { force = false, refresh = false 
       sidecar.pendingOverlay = coverage.overlay;
       sidecar.overlay = null;
     }
+    if (impact) {
+      const currentImpact = impactReviews.readCurrent(jobId, hasBody ? bodyPath : null);
+      if (!currentImpact || currentImpact.inputPath !== path.resolve(inputPath)
+        || !matchesVideoIdentity(currentImpact, fs.statSync(inputPath))
+        || currentImpact.result?.videoSha256 !== impact.videoSha256
+        || currentImpact.result?.candidate?.frameIndex !== impact.candidate.frameIndex
+        || currentImpact.result?.candidate?.timeMs !== impact.candidate.timeMs) {
+        impact = null;
+        if (refresh && [current, debugSidecar].some(value => value?.observations?.levels?.some(level => level?.status === 'observation'))) {
+          throw new Error('Impact candidate changed; previous club comparison preserved');
+        }
+      }
+    }
     if (!impact) {
       sidecar.overlayVideoSha256 = await hashVideoFile(inputPath);
-      sidecar.pendingOverlay = sidecar.overlay;
+      sidecar.pendingOverlay = sidecar.pendingOverlay || sidecar.overlay;
       sidecar.overlay = null;
       sidecar.observations = { status: 'withheld', revision: 1, automaticCoachingReady: false,
         reason: 'IMPACT_CANDIDATE_UNAVAILABLE', levels: [] };
+    } else if (sidecar.observations) {
+      sidecar.observations.impactReference = { videoSha256: impact.videoSha256,
+        frameIndex: impact.candidate.frameIndex, timeMs: impact.candidate.timeMs };
     }
     if (metaIdentity) {
       const metaPath = resolveMetaPath(generated.metaPath, jobId);

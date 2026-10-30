@@ -59,6 +59,8 @@ function harness() {
   const files = new Map([['/video.mp4', { ...identity }], ['/body.json', { ...identity, ino: 2 }]]);
   const metadataIdentity = { ...identity, ino: 3 };
   const calls = { meta: [], sidecar: [], archives: 0, failMeta: false, failArchive: false, failImpact: false, failBody: false, verifiedCoverage: false };
+  const impact = { candidate: { frameIndex: 3, timeMs: 100 }, frameTimesMs: [0, 33, 67, 100], videoSha256: 'a'.repeat(64) };
+  let currentImpact = structuredClone(impact), suppliedImpact = structuredClone(impact);
   const context = vm.createContext({
     console, Date, path, randomUUID, matchesVideoIdentity, DTL_V2_TAKEAWAY_PROFILE: 'test', DTL_V2_STALE_RUNNING_MS: 1000,
     fs: { existsSync: file => files.has(file), statSync: file => { if (!files.has(file)) throw new Error('missing file'); return { ...files.get(file) }; },
@@ -69,18 +71,20 @@ function harness() {
     resolveMetaPath: value => value,
     getVideoMeta: async () => ({ durationMs: 1000 }),
     requestDtlClubPointsV2MetaGeneration: async args => { calls.meta.push(args); entered(); await gate; return calls.failMeta ? null : { metaPath: `/tmp/${args.metadataJobId}.meta.json`, durationMs: 20 }; },
-    scheduleAutomaticImpact: async () => { if (calls.failImpact) throw new Error('impact unavailable'); return { candidate: { timeMs: 100 }, videoSha256: 'a'.repeat(64) }; },
+    scheduleAutomaticImpact: async () => { if (calls.failImpact) throw new Error('impact unavailable'); return structuredClone(suppliedImpact); },
+    impactReviews: { readCurrent: () => currentImpact && ({ inputPath: '/video.mp4', ...identity, result: structuredClone(currentImpact) }) },
     verifyClubSourceCoverage: async ({overlay}) => { calls.onCoverage?.(); return calls.verifiedCoverage
       ? { status: 'verified', missingFrames: 1, overlay } : { status: 'unverified', overlay }; },
     hashVideoFile: async () => { calls.onHash?.(); return 'a'.repeat(64); },
-    requestDtlClubPointsV2SidecarAnalysis: async args => { calls.sidecar.push(args); if(calls.failBody)throw Object.assign(new Error('missing pose'),{code:'BODY_UNAVAILABLE'}); return { ok: true, status: 'done', events: { takeawayMs: 20 },
+    requestDtlClubPointsV2SidecarAnalysis: async args => { calls.sidecar.push(args); calls.onSidecar?.(); if(calls.failBody)throw Object.assign(new Error('missing pose'),{code:'BODY_UNAVAILABLE'}); return { ok: true, status: 'done', events: { takeawayMs: 20 },
       eventValidation: { eventQuality: { takeaway: { status: 'confirmed' } } },
       clubObservations: { revision: 1, marker: 'new' }, overlay: { clubTimeSource: 'video_pts', clubFrames: [] } }; },
     queueNasArchive: () => { calls.archives++; if (calls.failArchive) throw new Error('archive unavailable'); },
     updateNasArchiveStatus: (_jobId, patch) => { cache.nasArchive = patch; },
   });
   vm.runInContext('let dtlClubPointsV2Tail = Promise.resolve(); const activeDtlClubPointsV2 = new Map();\n' + code, context);
-  return { context, started, release, files, calls, metadataIdentity, get cache() { return cache; }, set cache(value) { cache = value; },
+  return { context, started, release, files, calls, metadataIdentity, get currentImpact() { return currentImpact; }, set currentImpact(value) { currentImpact = value; },
+    set suppliedImpact(value) { suppliedImpact = value; }, get cache() { return cache; }, set cache(value) { cache = value; },
     get shot() { return shot; }, set shot(value) { shot = value; }, settle: () => vm.runInContext('dtlClubPointsV2Tail', context) };
 }
 
@@ -108,6 +112,8 @@ function harness() {
   h.release(); await h.settle();
   assert.equal(h.cache.dtlClubRefresh.status, 'succeeded');
   assert.equal(h.cache.dtlClubPointsV2.observations.marker, 'new');
+  assert.deepEqual(h.cache.dtlClubPointsV2.observations.impactReference,
+    { videoSha256: 'a'.repeat(64), frameIndex: 3, timeMs: 100 }, 'save the impact actually used for the comparison');
   assert.equal(h.cache.dtlClubRefreshSource.source.path, '/video.mp4');
   assert.equal(h.cache.dtlClubRefreshSource.body.path, '/body.json');
   assert.deepEqual(h.cache.dtlClubPointsV2BeforeRefresh, oldSidecar);
@@ -118,6 +124,50 @@ function harness() {
   assert.notEqual(again.refreshId, run.refreshId);
   await h.settle();
   assert.deepEqual(h.cache.dtlClubPointsV2BeforeRefresh, oldSidecar, 'first result remains recoverable');
+}
+
+for (const changed of [null, { candidate: { frameIndex: 2, timeMs: 67 }, videoSha256: 'a'.repeat(64) }]) {
+  const h = harness();
+  h.cache.dtlClubPointsV2 = { status: 'failed' };
+  h.cache.analysis.debug.dtlClubPointsV2 = null;
+  h.calls.onSidecar = () => { h.currentImpact = changed; };
+  h.context.scheduleDtlClubPointsV2Sidecar('job');
+  await h.started; h.release(); await h.settle();
+  assert.equal(h.cache.dtlClubPointsV2.status, 'succeeded', 'keep usable tracking even if the impact changed');
+  assert.equal(h.cache.dtlClubPointsV2.observations.reason, 'IMPACT_CANDIDATE_UNAVAILABLE');
+  assert.deepEqual(h.cache.dtlClubPointsV2.observations.levels, []);
+}
+
+{
+  const h = harness();
+  h.cache.dtlClubPointsV2 = { status: 'failed' }; h.cache.analysis.debug.dtlClubPointsV2 = null;
+  h.calls.verifiedCoverage = true; h.calls.onCoverage = () => { h.currentImpact = null; };
+  h.context.scheduleDtlClubPointsV2Sidecar('job');
+  await h.started; h.release(); await h.settle();
+  assert.equal(h.cache.dtlClubPointsV2.observations.reason, 'IMPACT_CANDIDATE_UNAVAILABLE');
+  assert.equal(h.cache.dtlClubPointsV2.pendingOverlay.clubTimeSource, 'video_pts', 'a verified trajectory remains available when the candidate changes');
+}
+
+{
+  const h = harness();
+  h.cache.dtlClubPointsV2 = { status: 'failed' }; h.cache.analysis.debug.dtlClubPointsV2 = null;
+  h.suppliedImpact = {videoSha256:'a'.repeat(64),candidate:{frameIndex:2,timeMs:100},frameTimesMs:[0,33,67,100]};
+  h.context.scheduleDtlClubPointsV2Sidecar('job');
+  await h.started; h.release(); await h.settle();
+  assert.equal(h.cache.dtlClubPointsV2.observations.reason, 'IMPACT_CANDIDATE_UNAVAILABLE', 'a candidate inconsistent with its own frame clock cannot anchor a comparison');
+  assert.equal(h.calls.sidecar[0].impactMs,undefined);
+}
+
+{
+  const h = harness();
+  const usable = { ...oldSidecar, observations: { revision: 1, levels: [{status:'observation'}] } };
+  h.cache.dtlClubPointsV2 = structuredClone(usable);
+  h.cache.analysis.debug.dtlClubPointsV2 = structuredClone(usable);
+  h.calls.onSidecar = () => { h.currentImpact = null; };
+  h.context.scheduleDtlClubPointsV2Sidecar('job', { force: true, refresh: true });
+  await h.started; h.release(); await h.settle();
+  assert.equal(h.cache.dtlClubRefresh.status, 'failed', 'a changing impact cannot replace a previously usable comparison');
+  assert.deepEqual(h.cache.dtlClubPointsV2, usable);
 }
 
 for (const change of ['failed-meta', 'source-changed', 'body-changed', 'body-appeared', 'body-path-changed', 'shot-changed', 'view-changed', 'sidecar-changed', 'debug-changed', 'deleted']) {
