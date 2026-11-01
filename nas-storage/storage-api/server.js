@@ -7,7 +7,7 @@ const archiveRoot = process.env.ARCHIVE_ROOT || '/archive';
 const token = process.env.ARCHIVE_TOKEN;
 const maxUploadBytes = Number(process.env.MAX_UPLOAD_BYTES || 4 * 1024 * 1024 * 1024);
 const validArtifacts = new Set([
-  'video', 'thumbnail', 'analysis-cache', 'analysis-result', 'body', 'meta',
+  'video', 'thumbnail', 'analysis-cache', 'analysis-result', 'body', 'meta', 'annotation',
   'lab-input-video', 'lab-contrast-video', 'lab-wrist-roi-video',
   'lab-body', 'lab-score', 'lab-run', 'lab-variants',
   'lab-source-meta', 'lab-contrast-meta', 'lab-wrist-roi-meta',

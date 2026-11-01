@@ -1361,11 +1361,12 @@ function swingTrackingArchiveRecordPath(jobId) {
   return path.join(swingTrackingArchiveDir, `${jobId}.json`);
 }
 
-function writeSwingTrackingArchiveStatus(jobId, archiveJobId, archive) {
+function writeSwingTrackingArchiveStatus(jobId, archiveJobId, archive, annotationUpdatedAt) {
   const recordPath = swingTrackingArchiveRecordPath(jobId);
   const record = {
     archiveJobId,
     sourceJobId: jobId,
+    annotationUpdatedAt,
     archive,
     updatedAt: new Date().toISOString(),
   };
@@ -1399,7 +1400,7 @@ function queueSwingTrackingAnnotationArchive(jobId, annotationPath, annotation) 
         updatedAt: annotation?.updatedAt || null,
       },
     },
-    onStatus: (archive) => writeSwingTrackingArchiveStatus(jobId, archiveJobId, archive),
+    onStatus: (archive) => writeSwingTrackingArchiveStatus(jobId, archiveJobId, archive, annotation?.updatedAt || null),
   });
   if (scheduled) {
     writeSwingTrackingArchiveStatus(jobId, archiveJobId, {
@@ -1407,7 +1408,7 @@ function queueSwingTrackingAnnotationArchive(jobId, annotationPath, annotation) 
       attempt: 0,
       retryAt: null,
       error: null,
-    });
+    }, annotation?.updatedAt || null);
   }
   return {
     state: scheduled ? 'pending' : 'not_scheduled',
@@ -4552,7 +4553,30 @@ app.get('/api/debug/infer/:jobId/annotation', async (req, res) => {
   }
   try {
     const annotation = await swingTrackingAnnotations.load(jobId);
-    return res.json({ ok: true, jobId, annotation });
+    let archive = { state: nasArchive.enabled ? 'unknown' : 'disabled' };
+    if (nasArchive.enabled && annotation?.updatedAt) {
+      try {
+        const record = JSON.parse(await fs.promises.readFile(swingTrackingArchiveRecordPath(jobId), 'utf8'));
+        if (record.annotationUpdatedAt === annotation.updatedAt &&
+            ['pending', 'uploading', 'retrying', 'failed', 'stored'].includes(record.archive?.state)) {
+          if (record.archive.state === 'stored') {
+            const artifact = record.archive.artifacts?.find((item) => item.artifact === 'annotation');
+            if (!artifact?.sha256) {
+              archive = { state: 'failed' };
+            } else {
+              const contents = await fs.promises.readFile(path.join(swingTrackingAnnotations.annotationDir, `${jobId}.json`));
+              const sha256 = createHash('sha256').update(contents).digest('hex');
+              if (sha256 === artifact.sha256) archive = { state: 'stored' };
+            }
+          } else {
+            archive = { state: record.archive.state };
+          }
+        }
+      } catch (error) {
+        if (error.code !== 'ENOENT') console.warn(`[nas-archive] unable to read annotation status: ${error.message}`);
+      }
+    }
+    return res.json({ ok: true, jobId, annotation, archive });
   } catch (error) {
     return res.status(500).json({ ok: false, jobId, message: error.message });
   }

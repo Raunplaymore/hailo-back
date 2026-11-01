@@ -172,8 +172,8 @@ function createNasArchive({ baseUrl, token, timeoutMs = 120_000, logger = consol
         pending.delete(key);
         const latest = pendingUpdates.get(key);
         pendingUpdates.delete(key);
-        if (completed && latest) {
-          latest.cache = { ...latest.cache, nasArchive: { ...latest.cache?.nasArchive, artifacts: completed.artifacts } };
+        if (latest) {
+          if (completed) latest.cache = { ...latest.cache, nasArchive: { ...latest.cache?.nasArchive, artifacts: completed.artifacts } };
           schedule(latest);
         }
       }
