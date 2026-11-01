@@ -18,6 +18,7 @@ const unrelated = path.join(inferDebugFrameDir, 'another-job', 'frame.jpg');
 const jobFrame = path.join(inferDebugFrameDir, 'job.1', 'frame.jpg');
 const write = file => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'fixture'); };
 let handler, deleted = false;
+let nasFails = false;
 const nasCalls = [];
 const shot = { jobId: 'job.1', media: { filename: 'video.mp4' } };
 const context = {
@@ -27,9 +28,9 @@ const context = {
   inferAnalysisPath: id => path.join(dataDir, 'analysis', `${id}.json`),
   bodyArtifactPath: id => path.join(dataDir, 'body', `${id}.json`),
   readAnalysisCache: () => null,
-  shotStore: { getShotByMediaName: name => name === 'video.mp4' ? shot : null,
+  shotStore: { listShots: () => [shot, {jobId:'missing-job',media:{filename:'missing.mp4'}}, {jobId:'dup-a',media:{filename:'duplicate.mp4'}}, {jobId:'dup-b',media:{filename:'duplicate.mp4'}}],
     removeShotByFilename: () => { deleted = true; } },
-  nasArchive: { enabled: true, deleteJob: async id => { nasCalls.push(id); } },
+  nasArchive: { enabled: true, deleteJob: async id => { nasCalls.push(id); if (nasFails) throw new Error('synthetic NAS failure'); } },
   app: { delete: (_route, fn) => { handler = fn; } },
 };
 vm.runInNewContext(cut('function isSafeJobId(', 'function localThumbnailUrl(')
@@ -47,6 +48,24 @@ try {
     assert.ok(fs.existsSync(path.join(uploadDir, name)), 'invalid ID must be rejected before removing the upload');
   }
   assert.deepEqual(nasCalls, [], 'invalid ID must not delete a NAS record');
+  write(path.join(uploadDir, 'duplicate.mp4'));
+  assert.equal((await remove('duplicate.mp4')).statusCode, 409);
+  assert.ok(fs.existsSync(path.join(uploadDir, 'duplicate.mp4')), 'ambiguous associations must preserve the video');
+  assert.deepEqual(nasCalls, [], 'ambiguous associations must not delete NAS data');
+  assert.equal((await remove('ghost.mp4')).statusCode, 404);
+  assert.deepEqual(nasCalls, [], 'a missing unregistered video must not delete an unrelated NAS record');
+  assert.equal((await remove('missing.mp4')).statusCode, 200, 'a recorded shot can be cleaned up when its video is already missing');
+  assert.deepEqual(nasCalls, ['missing-job']);
+  nasCalls.length = 0;
+  fs.mkdirSync(path.join(uploadDir, 'directory.mp4'));
+  fs.symlinkSync(unrelated, path.join(uploadDir, 'symlink.mp4'));
+  for (const name of ['directory.mp4', 'symlink.mp4']) assert.equal((await remove(name)).statusCode, 400);
+  assert.deepEqual(nasCalls, [], 'non-files and symlinks must be rejected before NAS deletion');
+  nasFails = true;
+  assert.equal((await remove('video.mp4')).statusCode, 500);
+  assert.ok(fs.existsSync(path.join(uploadDir, 'video.mp4')) && fs.existsSync(jobFrame), 'NAS failure must preserve Pi data');
+  nasFails = false;
+  nasCalls.length = 0;
   assert.ok(fs.existsSync(unrelated) && fs.existsSync(label), 'other records and labels must remain');
   assert.equal((await remove('video.mp4')).statusCode, 200);
   assert.deepEqual(nasCalls, ['job.1']);

@@ -4842,12 +4842,26 @@ app.delete('/api/files/:name', async (req, res) => {
   }
 
   try {
-    const shot = shotStore.getShotByMediaName(req.params.name);
+    const matchingShots = shotStore.listShots().filter((item) => item.media?.filename === req.params.name);
+    if (matchingShots.length > 1) return res.status(409).json({ ok: false, message: 'Multiple records refer to this file' });
+    const shot = matchingShots[0];
     const jobId = shot?.jobId || path.basename(req.params.name, path.extname(req.params.name));
     if (!isSafeJobId(jobId)) return res.status(400).json({ ok: false, message: 'Invalid jobId' });
+    let videoMissing = false;
+    try {
+      const stat = await fs.promises.lstat(target);
+      if (!stat.isFile()) return res.status(400).json({ ok: false, message: 'Invalid video file' });
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      videoMissing = true;
+    }
+    if (videoMissing && !shot) return res.status(404).json({ ok: false, message: 'File not found' });
     const cache = readAnalysisCache(jobId);
     if (nasArchive.enabled) await nasArchive.deleteJob(jobId);
-    await fs.promises.unlink(target);
+    if (!videoMissing) {
+      try { await fs.promises.unlink(target); }
+      catch (error) { if (error.code !== 'ENOENT' || !shot) throw error; }
+    }
     await removeJobArtifacts(jobId, cache);
     shotStore.removeShotByFilename(req.params.name);
     res.json({ ok: true, jobId });
